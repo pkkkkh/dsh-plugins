@@ -903,8 +903,9 @@ async function getAudioUrl(session, bvid, cid, quality = 32) {
   if (data.code !== 0) return undefined;
   const dashAudio = data.data?.dash?.audio;
   if (!Array.isArray(dashAudio) || dashAudio.length === 0) return undefined;
-  // 必剪是第三方服务按 URL 拉流：PCDN 节点（*.mcdn.bilivideo.cn）对它们经常拉不到，
-  // 任务会一直排队到超时。所以优先挑普通 CDN 地址，PCDN 只作兜底。
+  // 必剪是第三方服务按 URL 拉流：PCDN 节点（*.mcdn.bilivideo.cn、*.edge.mountaintoys.cn
+  // 等）对它们经常拉不到，任务会一直排队到超时。实测同一条音轨的备用地址里通常还有
+  // upos-sz-mirror*.bilivideo.com 这种普通 CDN，优先用它。
   const urls = [];
   for (const track of dashAudio) {
     const base = track?.baseUrl ?? track?.base_url;
@@ -914,7 +915,10 @@ async function getAudioUrl(session, bvid, cid, quality = 32) {
     }
   }
   if (urls.length === 0) return undefined;
-  return urls.find((u) => !/mcdn\.bilivideo\.cn/i.test(u)) ?? urls[0];
+  const isPcdn = (u) => /mcdn\.bilivideo\.cn|edge\.mountaintoys\.cn|\/\/[a-z]+\d+x\d+/i.test(u);
+  const upos = urls.find((u) => /upos-[^/]*\.bilivideo\.com/i.test(u));
+  if (upos) return upos;
+  return urls.find((u) => !isPcdn(u)) ?? urls[0];
 }
 
 async function abortableSleep(ms, signal) {
@@ -947,14 +951,33 @@ async function transcribeAudio(session, audioUrl, signal, opts = {}) {
   // 必剪是异步任务：刚建完立刻查会返回 state=3（空 remark）的假失败。
   // 所以每次查询前都等一个轮询间隔，并把头两次 state=3 当作瞬时错误继续等。
   let errorStreak = 0;
+  let garbageStreak = 0; // 非 JSON / HTTP 错误 / 拦截页：连续出现就快速放弃，别白等 120 秒
   for (let attempt = 0; attempt < maxPolls; attempt++) {
     await abortableSleep(BCUT_POLL_MS, signal);
-    const resResp = await fetch(
-      BCUT_API_BASE + "/task/result?model_id=8&task_id=" + taskId,
-      { headers: { "User-Agent": USER_AGENT, "Cache-Control": "no-cache" }, signal: requestSignal(signal, 30000) },
-    );
-    if (!resResp.ok) continue;
-    const res = await resResp.json();
+    let res;
+    try {
+      const resResp = await fetch(
+        BCUT_API_BASE + "/task/result?model_id=8&task_id=" + taskId,
+        { headers: { "User-Agent": USER_AGENT, "Cache-Control": "no-cache" }, signal: requestSignal(signal, 30000) },
+      );
+      if (!resResp.ok) {
+        if (++garbageStreak >= 3) throw new Error("bcut asr blocked: HTTP " + resResp.status);
+        continue;
+      }
+      const body = await resResp.text();
+      try {
+        res = JSON.parse(body);
+      } catch {
+        // 实测被限流时这里返回的是 B 站错误页 HTML 而不是 JSON
+        if (++garbageStreak >= 3) throw new Error("bcut asr blocked: non-JSON response");
+        continue;
+      }
+    } catch (error) {
+      if (String(error?.message ?? "").startsWith("bcut asr blocked")) throw error;
+      if (++garbageStreak >= 3) throw new Error("bcut asr unreachable: " + String(error?.message ?? error).slice(0, 80));
+      continue;
+    }
+    garbageStreak = 0;
     const state = res.data?.state;
     if (state === 3) {
       if (++errorStreak < 3) continue; // 瞬时失败：再等一轮
@@ -2130,4 +2153,4 @@ export async function extractAll(options) {
 
 
 /** 仅供单元测试使用的内部入口（不对外承诺稳定性）。 */
-export const __test__ = { mapLimit, pruneOutputDirs, dirSize, FRAME_CONCURRENCY, VISION_CONCURRENCY, flattenTranscript, charDiff, getAudioUrl };
+export const __test__ = { mapLimit, pruneOutputDirs, dirSize, FRAME_CONCURRENCY, VISION_CONCURRENCY, flattenTranscript, charDiff, getAudioUrl, transcribeAudio };
