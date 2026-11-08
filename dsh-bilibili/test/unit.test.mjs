@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { selectKeyframeTimestamps, formatTime } from "../lib/keyframes.js";
-import { parseSubtitleBody, nearestSubtitleText, guessStreamExt, parseWhisperTime, parseWhisperJson, resolveWhisperModel, parseSherpaText, parseSherpaResults, buildWhisperArgs, buildSherpaArgs, resolveVisionModel, buildVisionRequest, parseChatCompletion, DEFAULT_VISION_PROMPT, resolveVisionBaseUrl, resolveVisionPrompt, parseCitationHint, VISION_PROMPT_SHORT, pickNearestPeak, parseBlurMetadata, normalizeRequestedTimestamps } from "../lib/extractor.js";
+import { parseSubtitleBody, nearestSubtitleText, guessStreamExt, parseWhisperTime, parseWhisperJson, resolveWhisperModel, parseSherpaText, parseSherpaResults, buildWhisperArgs, buildSherpaArgs, resolveVisionModel, buildVisionRequest, parseChatCompletion, DEFAULT_VISION_PROMPT, resolveVisionBaseUrl, resolveVisionPrompt, parseCitationHint, VISION_PROMPT_SHORT, pickNearestPeak, parseBlurMetadata, normalizeRequestedTimestamps, isEmptySubtitleList, retryWhileEmpty, EMPTY_SUBTITLE_RETRY_DELAYS, mergeSubtitleLists, lacksManualChineseTrack } from "../lib/extractor.js";
 import { formatExtraction, capTranscriptSmart, pickDanmakuPeaks, formatEnvironment, renderEnvReport } from "../lib/format.js";
 import { summarizeChecks, ASR_PROVIDERS } from "../lib/envcheck.js";
 import { buildDigest } from "../lib/digest.js";
@@ -678,4 +678,115 @@ test("formatExtraction：渲染第二路 ASR 交叉校验（B）", () => {
   assert.ok(text.includes("asr-cross-check"), "有 asr-cross-check 段");
   assert.ok(text.includes("bcut-asr"), "标注了第二路来源");
   assert.ok(text.includes("民主党拿到众议院"), "列出了 ASR 版本");
+});
+
+test("isEmptySubtitleList：只有「成功但空」算空，登录受限和报错都不算", () => {
+  assert.equal(isEmptySubtitleList({ code: 0, data: { subtitle: { subtitles: [] } } }), true);
+  assert.equal(isEmptySubtitleList({ code: 0, data: {} }), true);
+  assert.equal(
+    isEmptySubtitleList({ code: 0, data: { need_login_subtitle: true, subtitle: { subtitles: [] } } }),
+    false,
+    "需要登录时不该重试，应直接提示登录",
+  );
+  assert.equal(
+    isEmptySubtitleList({ code: 0, data: { subtitle: { subtitles: [{ lan: "ai-zh" }] } } }),
+    false,
+  );
+  assert.equal(isEmptySubtitleList({ code: -404 }), false, "接口报错交给 apiGet 自己重试");
+});
+
+test("retryWhileEmpty：限流空数组会重试，拿到轨立刻停", async () => {
+  const empty = { code: 0, data: { subtitle: { subtitles: [] } } };
+  const hit = { code: 0, data: { subtitle: { subtitles: [{ lan: "ai-zh", subtitle_url: "//x" }] } } };
+  const waits = [];
+  let calls = 0;
+  const out = await retryWhileEmpty(async () => (++calls < 3 ? empty : hit), {
+    sleep: async (ms) => waits.push(ms),
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [EMPTY_SUBTITLE_RETRY_DELAYS[0], EMPTY_SUBTITLE_RETRY_DELAYS[1]]);
+  assert.equal(out.data.subtitle.subtitles[0].lan, "ai-zh");
+});
+
+test("retryWhileEmpty：一直空就放弃，不会无限重试", async () => {
+  const empty = { code: 0, data: { subtitle: { subtitles: [] } } };
+  let calls = 0;
+  const out = await retryWhileEmpty(
+    async () => {
+      calls += 1;
+      return empty;
+    },
+    { sleep: async () => {} },
+  );
+  assert.equal(calls, 1 + EMPTY_SUBTITLE_RETRY_DELAYS.length);
+  assert.equal(isEmptySubtitleList(out), true);
+  assert.ok(EMPTY_SUBTITLE_RETRY_DELAYS.reduce((a, b) => a + b, 0) < 60000, "总等待要远小于 ASR 兜底");
+});
+
+test("retryWhileEmpty：需要登录的空列表不重试", async () => {
+  let calls = 0;
+  await retryWhileEmpty(
+    async () => {
+      calls += 1;
+      return { code: 0, data: { need_login_subtitle: true, subtitle: { subtitles: [] } } };
+    },
+    { sleep: async () => {} },
+  );
+  assert.equal(calls, 1);
+});
+
+test("retryWhileEmpty：被取消后不再发请求", async () => {
+  let calls = 0;
+  let aborted = true;
+  await retryWhileEmpty(
+    async () => {
+      calls += 1;
+      return { code: 0, data: { subtitle: { subtitles: [] } } };
+    },
+    { sleep: async () => {}, isAborted: () => aborted },
+  );
+  assert.equal(calls, 1);
+});
+
+test("mergeSubtitleLists：同一条轨的不同签名 url 只保留一份", () => {
+  // wbi 与 player/v2 对同一条 AI 轨给的是不同 url，按 url 去重会变成两条，
+  // 交叉校验就成了「自己比自己」，所以必须按语言去重。
+  const wbi = { code: 0, data: { subtitle: { subtitles: [{ lan: "ai-zh", lan_doc: "中文", subtitle_url: "//wbi-ai" }] } } };
+  const plain = {
+    code: 0,
+    data: {
+      subtitle: {
+        subtitles: [
+          { lan: "zh-CN", lan_doc: "中文（中国）", subtitle_url: "//cc" },
+          { lan: "ai-zh", lan_doc: "中文", subtitle_url: "//plain-ai" },
+        ],
+      },
+    },
+  };
+  const merged = mergeSubtitleLists(wbi, plain);
+  assert.equal(merged.length, 2, "同语言同 lang_doc 的 AI 轨只留一份");
+  assert.deepEqual(merged.map((s) => s.lan), ["ai-zh", "zh-CN"]);
+  assert.equal(merged[0].subtitle_url, "//wbi-ai", "重复时保留 wbi 的 url");
+});
+
+test("mergeSubtitleLists：端点报错时只用另一边", () => {
+  const ok = { code: 0, data: { subtitle: { subtitles: [{ lan: "zh-CN", subtitle_url: "//cc" }] } } };
+  assert.equal(mergeSubtitleLists({ code: -1 }, ok).length, 1);
+  assert.equal(mergeSubtitleLists(ok, { code: -1 }).length, 1);
+  assert.equal(mergeSubtitleLists({ code: -1 }, { code: -1 }).length, 0);
+});
+
+test("lacksManualChineseTrack：只有 AI 中文轨时才值得再探人工轨", () => {
+  const aiOnly = { code: 0, data: { subtitle: { subtitles: [{ lan: "ai-zh", ai_status: 2 }] } } };
+  assert.equal(lacksManualChineseTrack(aiOnly), true, "只有 AI 中文轨 -> 再探");
+  const mixed = {
+    code: 0,
+    data: { subtitle: { subtitles: [{ lan: "zh-Hans" }, { lan: "ai-zh", ai_status: 2 }] } },
+  };
+  assert.equal(lacksManualChineseTrack(mixed), false, "已有人工轨 -> 不用再探");
+  const empty = { code: 0, data: { subtitle: { subtitles: [] } } };
+  assert.equal(lacksManualChineseTrack(empty), false, "空列表归 isEmptySubtitleList 管");
+  const enOnly = { code: 0, data: { subtitle: { subtitles: [{ lan: "ai-en", ai_status: 2 }] } } };
+  assert.equal(lacksManualChineseTrack(enOnly), false, "没有中文轨就不探");
+  assert.equal(lacksManualChineseTrack({ code: -1 }), false);
 });

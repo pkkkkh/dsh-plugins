@@ -724,13 +724,122 @@ async function fetchSubtitleTrack(session, track) {
   return parseSubtitleBody(await resp.json());
 }
 
-async function getSubtitle(session, bvid, cid) {
+/**
+ * 空字幕列表判定：接口成功、但没有字幕轨、也不是「需要登录」。
+ * B 站限流时会返回 code=0 + 空数组（不是 412、不是报错），若当成「无字幕」，
+ * 就会白白掉进 60 秒的 ASR 兜底，最后输出「No transcript」。
+ */
+export function isEmptySubtitleList(data) {
+  if (data?.code !== 0) return false;
+  if (data?.data?.need_login_subtitle === true) return false;
+  const subtitles = data?.data?.subtitle?.subtitles;
+  return !Array.isArray(subtitles) || subtitles.length === 0;
+}
+
+/** 空列表时的重试间隔（毫秒）；总等待约 9.5 秒，远小于 ASR 兜底的 60 秒。 */
+export const EMPTY_SUBTITLE_RETRY_DELAYS = [1500, 3000, 5000];
+
+/**
+ * 拉字幕列表；遇到「成功但空」的重试几次，避免把限流误判成无字幕。
+ * fetchOnce/sleep/isAborted 可注入，便于单测。
+ */
+export async function retryWhileEmpty(fetchOnce, options = {}) {
+  const delays = options.delays ?? EMPTY_SUBTITLE_RETRY_DELAYS;
+  const sleepFn = options.sleep ?? sleep;
+  const isAborted = options.isAborted ?? (() => false);
+  let data = await fetchOnce();
+  if (!isEmptySubtitleList(data)) return data;
+  for (const ms of delays) {
+    if (isAborted()) return data;
+    await sleepFn(ms);
+    if (isAborted()) return data;
+    const again = await fetchOnce();
+    if (!isEmptySubtitleList(again)) return again;
+    data = again;
+  }
+  return data;
+}
+
+/**
+ * 合并两个端点的字幕列表：同一视频 wbi 与 player/v2 返回的轨**并不一致**
+ * （实测 BV1sKxQ6nEiL：player/v2 有 zh-CN 人工轨 + ai-zh，wbi 只有 ai-zh）。
+ * 以 subtitle_url 去重，wbi 的条目优先（url 更稳）。
+ */
+export function mergeSubtitleLists(primaryData, extraData) {
+  const pick = (data) =>
+    data?.code === 0 && Array.isArray(data?.data?.subtitle?.subtitles)
+      ? data.data.subtitle.subtitles
+      : [];
+  const merged = [];
+  const seen = new Set();
+  for (const track of [...pick(primaryData), ...pick(extraData)]) {
+    if (!track) continue;
+    // 按语言去重，不能按 url：同一条轨在两个端点会拿到不同的签名 url，
+    // 按 url 去重会把「同一条 AI 轨」变成两条，交叉校验就成了自己比自己。
+    const key = `${String(track.lan ?? "")}|${String(track.lan_doc ?? "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(track);
+  }
+  return merged;
+}
+
+/** 已有一条非 AI 的中文轨就够用，不必再多打一次接口。 */
+function hasManualChineseTrack(subtitles) {
+  return subtitles.some((s) => isChineseSubtitleTrack(s) && !isAiSubtitleTrack(s));
+}
+
+/** 取字幕列表：WBI 签名接口优先，空列表或失败都退回 player/v2，并合并两边的轨。 */
+async function fetchSubtitleList(session, bvid, cid) {
   // WBI-signed endpoint first: returns stable subtitle_url (incl. ai-zh tracks).
-  // The plain player/v2 response is flaky for logged-in sessions.
-  let data = { code: -1 };
+  // The plain player/v2 response is flaky for logged-in sessions — but the
+  // reverse happens too, and the two endpoints can disagree on which tracks
+  // exist, so an empty (or AI-only) wbi answer is not final.
   const signed = await getWbiSignedParams(session, { bvid, cid });
-  if (signed) data = await apiGet(session, "/x/player/wbi/v2", signed);
-  if (data.code !== 0) data = await apiGet(session, "/x/player/v2", { bvid, cid });
+  const wbi = signed ? await apiGet(session, "/x/player/wbi/v2", signed) : { code: -1 };
+  const wbiTracks = mergeSubtitleLists(wbi, null);
+  if (hasManualChineseTrack(wbiTracks)) return wbi;
+
+  const plain = await apiGet(session, "/x/player/v2", { bvid, cid });
+  const merged = mergeSubtitleLists(wbi, plain);
+  if (merged.length > 0) {
+    return { code: 0, data: { ...(wbi.code === 0 ? wbi.data : plain.data), subtitle: { subtitles: merged } } };
+  }
+  // 两边都空：优先返回 wbi（code 0），让上层按「可能被限流」重试
+  return wbi.code === 0 ? wbi : plain;
+}
+
+/** 有中文轨、但全是 AI 轨（没有人工 CC）。B 站不同节点返回的字幕元数据不一致，
+ *  这时值得再探几次：实测同一 cid 连续请求会分别给出「2 条（含 zh-Hans）」和
+ *  「1 条（只有 ai-zh）」两种结果。 */
+export function lacksManualChineseTrack(data) {
+  if (data?.code !== 0) return false;
+  const subs = data?.data?.subtitle?.subtitles;
+  if (!Array.isArray(subs) || subs.length === 0) return false;
+  const zh = subs.filter(isChineseSubtitleTrack);
+  return zh.length > 0 && zh.every((s) => isAiSubtitleTrack(s));
+}
+
+/** 探测人工轨时的额外等待（毫秒），只在中英文轨齐全与否可疑时使用。 */
+export const MANUAL_TRACK_PROBE_DELAYS = [800, 1600];
+
+async function getSubtitle(session, bvid, cid, opts = {}) {
+  const isAborted = () => session.signal?.aborted === true;
+  let data = await retryWhileEmpty(() => fetchSubtitleList(session, bvid, cid), {
+    sleep: (ms) => abortableSleep(ms, session.signal),
+    isAborted,
+  });
+  // 只有 AI 中文轨时，再探几次人工 CC 轨（默认关，显式开启才付这点延迟）
+  if (opts.probeManualTrack === true && lacksManualChineseTrack(data)) {
+    for (const ms of MANUAL_TRACK_PROBE_DELAYS) {
+      if (isAborted()) break;
+      await abortableSleep(ms, session.signal);
+      const again = await fetchSubtitleList(session, bvid, cid);
+      if (isEmptySubtitleList(again)) continue;
+      data = again;
+      if (!lacksManualChineseTrack(again)) break;
+    }
+  }
   if (data.code !== 0) return emptySubtitle("subtitle list failed: " + (data.message ?? ""));
   const subtitles = data.data?.subtitle?.subtitles ?? [];
   if (!Array.isArray(subtitles) || subtitles.length === 0) {
@@ -1678,6 +1787,7 @@ export async function extractAll(options) {
     asrProvider,
     asrFallback = true, // 旧字段别名：false 等价于 asrProvider: "none"
     crossCheckAsr = false, // B：字幕轨存在时，用第二路 ASR 再转一遍做交叉校验（慢，默认关）
+    probeManualTrack = false, // 只有 AI 中文轨时多探几次人工 CC 轨（多约 2.4 秒，默认关）
     whisperBin = "whisper-cli",
     whisperModel = "medium",
     whisperModelDir = "",
@@ -1731,7 +1841,7 @@ export async function extractAll(options) {
   let comments;
   let danmaku;
   [subtitle, comments, danmaku] = await Promise.all([
-    guarded(() => getSubtitle(session, bvid, info.cid), emptySubtitle),
+    guarded(() => getSubtitle(session, bvid, info.cid, { probeManualTrack }), emptySubtitle),
     guarded(() => getComments(session, info.aid, commentLimit), emptyComments),
     guarded(() => getDanmaku(session, info.cid), emptyDanmaku),
   ]);

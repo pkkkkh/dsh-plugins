@@ -132,6 +132,7 @@ dsh plugin --profile web add git+https://github.com/CZX2244/dsh-bilibili
         sceneThreshold: 0.4          # 场景切换阈值 0-1，越大越严格
         sharpFrames: true            # 清晰帧优选：目标时间点 ±1.5s 内 blurdetect 选最清晰帧
         asrProvider: 'bcut'          # ASR 引擎：bcut(必剪,默认) | sherpa-onnx(中文推荐) | whisper-local | auto | none
+        probeManualTrack: true       # 只看到 AI 中文轨时，再探 2 次人工 CC 轨（+约 2.4 秒，双轨交叉校验更稳）
         sherpaBin: ''                # sherpa-onnx-offline 可执行文件路径
         sherpaModel: ''              # sherpa 模型 onnx 路径（SenseVoice/Paraformer）
         sherpaModelType: 'sense-voice'  # sense-voice | paraformer | zipformer2-ctc

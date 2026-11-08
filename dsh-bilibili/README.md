@@ -124,6 +124,7 @@ Defaults live in `cordis.patch.yml`; override any field in `$DSH_HOME/profiles/w
         sceneThreshold: 0.4          # scene threshold 0-1, higher = stricter
         sharpFrames: true            # sharp-frame preference: blurdetect picks the sharpest frame within ±1.5s
         asrProvider: 'bcut'          # ASR engine: bcut (default) | sherpa-onnx (Chinese) | whisper-local | auto | none
+        probeManualTrack: true       # re-probe for a manual CC track when only an AI track shows up (+~2.4s)
         sherpaBin: ''                # sherpa-onnx-offline binary path
         sherpaModel: ''              # sherpa model onnx path (SenseVoice/Paraformer)
         sherpaModelType: 'sense-voice'  # sense-voice | paraformer | zipformer2-ctc
