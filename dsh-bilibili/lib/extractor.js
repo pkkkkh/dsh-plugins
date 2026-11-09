@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { selectKeyframeTimestamps } from "./keyframes.js";
+import { formatTime, selectKeyframeTimestamps } from "./keyframes.js";
 
 const API_BASE = "https://api.bilibili.com";
 const REFERER = "https://www.bilibili.com/";
@@ -29,6 +29,9 @@ const SCENE_SAMPLED_STEP_FRAMES = 60; // sampled pass decodes 1 frame per 60 (~2
 const SCENE_PEAK_MIN_GAP = 5;
 const VIDEO_CACHE_TTL_MS = 24 * 3600 * 1000;
 const TRANSCRIPT_CACHE_TTL_MS = 7 * 24 * 3600 * 1000; // 文稿小且不变，缓存 7 天
+// 字幕错配守卫：字幕末段 > 视频时长 * 1.5 + 60s 视为「挂错视频的字幕」
+const SUBTITLE_DURATION_FACTOR = 1.5;
+const SUBTITLE_DURATION_SLACK_SECONDS = 60;
 const MAX_RETRIES = 2;
 const AUDIO_CAP_BYTES = 200 * 1048576; // whisper-local 音频下载上限（DASH 纯音频远小于视频）
 const AUDIO_CONVERT_TIMEOUT_MS = 180000; // 整段音频转 16kHz WAV（长视频需要数十秒）
@@ -547,6 +550,45 @@ export function pickSubtitleTracks(subtitles) {
           s.subtitle_url !== primary.subtitle_url,
       ) ?? null;
   return { primary, secondary };
+}
+
+/** 字幕分段的最大结束时间（秒）；没有合法分段时返回 0。 */
+export function maxSubtitleEnd(segments) {
+  let end = 0;
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const value = Number(segment?.end ?? segment?.start ?? 0);
+    if (Number.isFinite(value) && value > end) end = value;
+  }
+  return end;
+}
+
+/** 字幕时间戳是否与视频时长严重不符。
+ *  B站实测会把别的视频的 AI 字幕挂到当前 BV 上（18s 视频返回 8.5 分钟股市文稿），
+ *  字幕末段远超视频时长时视为错配：丢弃字幕、改走 ASR 兜底。 */
+export function subtitleDurationMismatch(segments, duration) {
+  const videoSeconds = Number(duration);
+  if (!Number.isFinite(videoSeconds) || videoSeconds <= 0) return false;
+  return maxSubtitleEnd(segments) > videoSeconds * SUBTITLE_DURATION_FACTOR + SUBTITLE_DURATION_SLACK_SECONDS;
+}
+
+/** 应用字幕错配守卫：命中时丢弃字幕（改走 ASR 兜底）并返回告警。
+ *  纯函数，便于单测；extractAll 只负责调用与合并 note。 */
+export function applySubtitleDurationGuard(subtitle, duration) {
+  if (!subtitle || subtitle.source !== "subtitle") return { subtitle, warning: "" };
+  if (!subtitleDurationMismatch(subtitle.segments, duration)) return { subtitle, warning: "" };
+  const warning = "字幕与视频时长严重不符（字幕到 " + formatTime(maxSubtitleEnd(subtitle.segments)) +
+    "，视频 " + formatTime(duration) + "），已丢弃错配字幕";
+  return {
+    subtitle: {
+      ...subtitle,
+      source: "none",
+      text: "",
+      segments: [],
+      total_segments: 0,
+      note: warning,
+    },
+    warning,
+  };
 }
 
 /** 最长公共子序列比例（0–1），用于两条字幕轨的逐句相似度。 */
@@ -1912,6 +1954,12 @@ export async function extractAll(options) {
     guarded(() => getDanmaku(session, info.cid), emptyDanmaku),
   ]);
 
+  // 字幕时长守卫：B站偶发把别的视频的 AI 字幕挂到当前 BV 上（实测 18 秒视频先后返回过
+  // 8 分半股市文稿和 4 分半钢化膜文稿）。命中后丢弃字幕、改走 ASR，避免模型把错文稿当正文。
+  const guardedSubtitle = applySubtitleDurationGuard(subtitle, info.duration);
+  subtitle = guardedSubtitle.subtitle;
+  const subtitleWarning = guardedSubtitle.warning;
+
   // 环境体检：本地凭证已失效时，提前告知模型重新登录可拿到需要登录的字幕
   if (envChecks.get("credential-validity")?.status === "warn" && /require login/i.test(subtitle.note ?? "")) {
     subtitle = { ...subtitle, note: subtitle.note + " | 环境体检：本地 SESSDATA 已失效，重新扫码登录后可获取该字幕" };
@@ -2021,6 +2069,14 @@ export async function extractAll(options) {
         subtitle = { ...subtitle, note: subtitle.note + " | ASR fallback failed: " + (asr.note ?? "") };
       }
     }
+  }
+
+  // ASR 兜底可能整个替换了 subtitle（note 随之丢失），把错配警告合并回来
+  if (subtitleWarning && !String(subtitle.note ?? "").includes(subtitleWarning)) {
+    subtitle = {
+      ...subtitle,
+      note: subtitle.note ? subtitle.note + " | " + subtitleWarning : subtitleWarning,
+    };
   }
 
   const frames = { enabled: false, strategy: "", mode: "none", frames: [], error: null, note: "" };

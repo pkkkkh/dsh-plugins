@@ -9,7 +9,7 @@ import { parseSubtitleBody, nearestSubtitleText, guessStreamExt, parseWhisperTim
 import { formatExtraction, capTranscriptSmart, pickDanmakuPeaks, formatEnvironment, renderEnvReport } from "../lib/format.js";
 import { summarizeChecks, ASR_PROVIDERS, spawnCheck } from "../lib/envcheck.js";
 import { buildDigest } from "../lib/digest.js";
-import { __test__ as extractorInternals, pickSubtitleTracks, crossCheckTranscripts, lcsRatio, isAiSubtitleTrack, readTranscriptCache, writeTranscriptCache } from "../lib/extractor.js";
+import { __test__ as extractorInternals, pickSubtitleTracks, crossCheckTranscripts, lcsRatio, isAiSubtitleTrack, readTranscriptCache, writeTranscriptCache, maxSubtitleEnd, subtitleDurationMismatch, applySubtitleDurationGuard } from "../lib/extractor.js";
 import { detectAdSegments } from "../lib/ads.js";
 import { probeTranscript } from "../lib/channel.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -848,4 +848,41 @@ test("spawnCheck：卡住的二进制会被超时 kill 掉", async () => {
 
 test("spawnCheck：不存在的二进制是 missing", async () => {
   assert.equal(await spawnCheck("definitely-not-a-real-binary-xyz", ["--help"], 1000), "missing");
+});
+
+test("maxSubtitleEnd：取最大结束时间，忽略非法分段", () => {
+  assert.equal(maxSubtitleEnd([{ start: 1, end: 3 }, { start: 5, end: 7 }]), 7);
+  assert.equal(maxSubtitleEnd([{ start: 9 }]), 9);
+  assert.equal(maxSubtitleEnd([]), 0);
+  assert.equal(maxSubtitleEnd(null), 0);
+});
+
+test("subtitleDurationMismatch：18 秒视频配 8 分半字幕判错配", () => {
+  assert.equal(subtitleDurationMismatch([{ start: 0, end: 500 }], 18), true);
+  assert.equal(subtitleDurationMismatch([{ start: 0, end: 20 }], 18), false, "20s 字幕配 18s 视频不算错配");
+  assert.equal(subtitleDurationMismatch([], 18), false, "空字幕不算错配");
+  assert.equal(subtitleDurationMismatch([{ start: 0, end: 10 }], 0), false, "视频时长未知时不判");
+});
+
+test("applySubtitleDurationGuard：命中就丢弃字幕并带告警", () => {
+  const subtitle = {
+    source: "subtitle",
+    text: "股市文稿",
+    segments: [{ start: 0, end: 500 }],
+    total_segments: 1,
+    note: "",
+  };
+  const out = applySubtitleDurationGuard(subtitle, 18);
+  assert.equal(out.subtitle.source, "none", "丢弃后应改走 ASR 兜底");
+  assert.equal(out.subtitle.text, "");
+  assert.equal(out.subtitle.segments.length, 0);
+  assert.match(out.warning, /已丢弃错配字幕/);
+  assert.match(out.subtitle.note, /08:20/, "告警里应带字幕末段时间");
+});
+
+test("applySubtitleDurationGuard：正常字幕原样返回", () => {
+  const subtitle = { source: "subtitle", text: "hi", segments: [{ start: 0, end: 10 }], note: "" };
+  const out = applySubtitleDurationGuard(subtitle, 18);
+  assert.equal(out.warning, "");
+  assert.equal(out.subtitle, subtitle);
 });
