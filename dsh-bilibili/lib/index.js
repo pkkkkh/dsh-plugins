@@ -193,7 +193,12 @@ function apply(ctx, config) {
       "【一·读文稿】bilibili_extract(url, extract_frames: false) 只拿文字（秒级、零下载）。逐段找「离开画面就不完整」的位置：指代悬空（这个/如图/就是它）、只给评价没给数据、操作没说清选项、数秒无声演示、对比没展开。记下该句附近的时间点；纯口播不用看画面。\n\n" +
       "【二·定向抓帧】回复末尾用固定格式列出时刻：[建议抓帧] mm:ss 理由，随即调 bilibili_extract(url, timestamps: [...])。只引用「配图建议=适合」且画面清晰的帧，每段至多 1–2 张；没有需要就不配图。模型支持图像时可用 read_image 看帧。\n\n" +
       "【登录】字幕需要登录时用 bilibili_login：action=start 出二维码（字符码放代码块 + 本地图片路径，别交给第三方二维码服务）→ 用户扫码后 action=poll。成功后 SESSDATA 自动保存。\n" +
-      "【环境】每次提取附带体检（约缓存 1 小时）；出现 warn/missing/unreachable/error 时把「处理建议」转达用户；改依赖或配置后用 bilibili_doctor(refresh=true)。\n\n" +
+      "【环境】每次提取附带体检（约缓存 1 小时）；出现 warn/missing/unreachable/error 时把「处理建议」转达用户；改依赖或配置后用 bilibili_doctor(refresh=true)。\n" +
+      "【兜底·bili_watch】平时**不要**调用 bili_watch（dsh-bili-watch 插件的工具）。只有 bilibili_extract 明确暴露出下列问题时，才用它兜底，并在结果里标注数据来源：\n" +
+      "  (1) 需要画面里的文字（OCR、硬字幕、表格截图），而本插件只提供了帧图；\n" +
+      "  (2) 字幕被判「错配/疑似诱饵」且 ASR 也失败；\n" +
+      "  (3) bcut 超时或不可用，需要本地离线转写。\n" +
+      "  其余情况一律用 bilibili_extract；不要为了「更全面」重复再扒一遍（重复跑等于双份 token）。\n\n" +
       "按下面的模板输出（可用 summaryTemplate 配置替换）：\n\n" + template +
       "\n\n更深的输出形态（学习笔记/时间轴/问答卡）改用 bilibili-video-analyzer skill。",
   });
