@@ -5,16 +5,22 @@
 ```
 原始源码：C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff\src
 编译产物：C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff\lib
-运行时：  C:\Users\kh006\.dsh\profiles\desktop\node_modules\dsh-handoff
+运行时：  $DSH_HOME\profiles\desktop\node_modules\dsh-handoff
 ```
+
+> **2026-11-09 起 DSH 的 home 切到了 `D:\dsh-home`**，所以本机运行时是
+> `D:\dsh-home\profiles\desktop\node_modules\dsh-handoff`。
+> 下面的命令统一用 `$home` 自动解析，别写死 C 盘（C 上那份是旧副本）。
 
 ## 改代码的标准流程
 
-pnpm 不在系统 PATH 里，用 DSH 自带的这个（11.28.5）：
+pnpm 不在系统 PATH 里，用 DSH 自带的这个（11.28.5）。先解析 `$home`：
 
 ```powershell
-$node = "C:\Users\kh006\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-$pnpm = "C:\Users\kh006\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.mjs"
+$home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+$node = Join-Path $home "dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+$pnpm = Join-Path $home "dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.mjs"
+$env:Path = (Split-Path $node) + ";" + $env:Path   # pnpm 脚本里会直接调 node
 cd C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff
 
 & $node $pnpm install      # 首次，或 package.json 变了
@@ -23,13 +29,12 @@ cd C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff
 & $node $pnpm typecheck    # 可选，改类型时跑
 ```
 
-> 工作区目前**还没装依赖**（没有 `node_modules`），第一次要先跑 `install`。
-
 ## 同步到运行时
 
 ```powershell
-$src = "C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff"
-$dst = "C:\Users\kh006\.dsh\profiles\desktop\node_modules\dsh-handoff"
+$home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+$src  = "C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff"
+$dst  = Join-Path $home "profiles\desktop\node_modules\dsh-handoff"
 Copy-Item "$src\lib\*" "$dst\lib" -Force
 Copy-Item "$src\package.json","$src\cordis.patch.yml" $dst -Force
 ```
@@ -47,12 +52,15 @@ Copy-Item "$src\package.json","$src\cordis.patch.yml" $dst -Force
 
 ## 快速自检
 
+在上一节的 PowerShell 会话里（`$node` / `$pnpm` / `$env:Path` 已就绪）：
+
 ```powershell
-pnpm check:install      # 检查装机目录是否完整
-pnpm integration        # 端到端集成测试
+& $node $pnpm check:install desktop   # 检查装机目录是否完整
+& $node $pnpm integration             # 端到端集成测试
 ```
 
 ## 说明
 
-- 本目录是 [zhenbang1216/dsh-handoff](https://github.com/zhenbang1216/dsh-handoff) 的源码副本，MIT 协议。
+- 本目录是**自用维护版**（0.4.0）：派生自 [zhenbang1216/dsh-handoff](https://github.com/zhenbang1216/dsh-handoff)（上游 main 还是 0.3.0），加了客户端整页面板、`/api/dsh-handoff/*` 接口、版本/续写、工具活动清单、`/attach` 接续等；MIT 协议。
+- `../vendor/dsh-handoff` 是**安装用的副本**（profile 的 `file:` 依赖指向它），内容与本目录一致（只差本 SYNC.md）。改代码以本目录为准，构建后按上面同步到运行时。
 - 与 `../dsh-bilibili` 不同：那个是纯 JS、改 `lib/*.js` 直接生效；这个必须走 `pnpm build`。
