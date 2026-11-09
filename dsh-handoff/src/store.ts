@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, normalize, resolve } from 'node:path'
 import { HandoffError } from './errors.ts'
 import { parseDocumentSummary, type DocumentSummary } from './markdown.ts'
@@ -39,12 +39,16 @@ function assertBareName(name: string): void {
   }
 }
 
-/** Write one document, creating the directory when needed. */
+/** Write one document, creating the directory when needed.
+ *  Write to a temporary file first and rename it into place: a crash or a
+ *  failed write must never leave a half-written handoff document behind. */
 export async function writeDocument(dir: string, name: string, content: string): Promise<string> {
   assertBareName(name)
   await mkdir(dir, { recursive: true })
   const target = join(dir, name)
-  await writeFile(target, content, 'utf8')
+  const temp = target + '.tmp'
+  await writeFile(temp, content, 'utf8')
+  await rename(temp, target)
   return target
 }
 
@@ -59,11 +63,15 @@ export async function listDocuments(dir: string, limit = 50): Promise<DocumentEn
   }
   const entries: DocumentEntry[] = []
   for (const name of names) {
-    if (!name.endsWith('.md') || name === 'latest.md') continue
+    if (!name.endsWith('.md') || name === 'latest.md' || name.endsWith('.tmp')) continue
     const path = join(dir, name)
-    const info = await stat(path)
-    if (!info.isFile()) continue
-    entries.push({ name, path, size: info.size, modifiedAt: info.mtimeMs })
+    try {
+      const info = await stat(path)
+      if (!info.isFile()) continue
+      entries.push({ name, path, size: info.size, modifiedAt: info.mtimeMs })
+    } catch {
+      // The file disappeared between readdir and stat: skip it, do not fail the list.
+    }
   }
   entries.sort((a, b) => b.modifiedAt - a.modifiedAt)
   return entries.slice(0, limit)

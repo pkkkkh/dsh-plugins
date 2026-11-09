@@ -25,6 +25,7 @@ const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CACHE_FILE = join(PLUGIN_ROOT, ".envcheck.json");
 const CACHE_TTL_MS = 3600 * 1000; // 体检报告缓存 1 小时
 const PROBE_TIMEOUT_MS = 6000;
+const SPAWN_TIMEOUT_MS = 8000; // 单个 CLI 探针上限：卡住的二进制必须被 kill，否则体检永久挂起
 const API_BASE = "https://api.bilibili.com";
 const BCUT_API_BASE = "https://member.bilibili.com/x/bcut/rubick-interface";
 const PASSPORT_BASE = "https://passport.bilibili.com";
@@ -35,18 +36,45 @@ const USER_AGENT =
 /** asrProvider 合法取值（与 README / extractor 保持一致）。 */
 export const ASR_PROVIDERS = ["bcut", "sherpa-onnx", "whisper-local", "auto", "none"];
 
-/** Spawn 一个 CLI（stdio 忽略、无管道）：ok=能启动；missing=ENOENT；error=其他启动错误。 */
-function spawnCheck(bin, args = ["--help"]) {
+/** Spawn 一个 CLI（stdio 忽略、无管道）：ok=能启动；missing=ENOENT；error=其他启动错误或超时。
+ *  必须有超时 + kill：任一二进制卡住（等 stdin、被杀软挂起）都会让
+ *  Promise.allSettled 永不返回，进而把插件加载和 bilibili_extract 一起拖死。 */
+export function spawnCheck(bin, args = ["--help"], timeoutMs = SPAWN_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let child;
+    let settled = false;
+    let timer = null;
+    const finish = (state) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(state);
+    };
+    const kill = () => {
+      if (!child) return;
+      try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      if (process.platform === "win32" && child.pid) {
+        try {
+          spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+        } catch { /* ignore */ }
+      }
+    };
     try {
       child = spawn(bin, args, { stdio: "ignore", windowsHide: true });
     } catch (error) {
-      resolve(error?.code === "ENOENT" ? "missing" : "error");
+      finish(error?.code === "ENOENT" ? "missing" : "error");
       return;
     }
-    child.on("error", (error) => resolve(error?.code === "ENOENT" ? "missing" : "error"));
-    child.on("close", () => resolve("ok"));
+    timer = setTimeout(() => {
+      kill();
+      finish("error");
+    }, Math.max(100, Number(timeoutMs) || SPAWN_TIMEOUT_MS));
+    if (typeof timer.unref === "function") timer.unref();
+    child.on("error", (error) => finish(error?.code === "ENOENT" ? "missing" : "error"));
+    child.on("close", () => finish("ok"));
   });
 }
 

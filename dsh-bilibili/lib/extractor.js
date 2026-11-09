@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { selectKeyframeTimestamps } from "./keyframes.js";
@@ -510,13 +510,18 @@ function isChineseSubtitleTrack(track) {
   return lan.includes("zh") || /中文|汉语|國語|国语/.test(name);
 }
 
-/** 选轨打分：人工 > AI，简体中文 > 繁体中文 > 其它语种。 */
-function rankSubtitleTrack(track) {
+/** 该轨是否繁体中文（参考轨要排除：简繁用字差异会被逐字差分判成错字）。 */
+function isTraditionalChineseTrack(track) {
   const lan = String(track?.lan ?? "").toLowerCase();
   const name = String(track?.lan_name ?? "");
+  return /^(zh-hant|zh-tw|zh-hk)/.test(lan) || /繁體|繁体|台灣|台湾/.test(name);
+}
+
+/** 选轨打分：人工 > AI，简体中文 > 繁体中文 > 其它语种。 */
+function rankSubtitleTrack(track) {
   let score = 0;
   if (isChineseSubtitleTrack(track)) score += 6;
-  if (/^(zh-hant|zh-tw|zh-hk)/.test(lan) || /繁體|繁体|台灣|台湾/.test(name)) score -= 1;
+  if (isTraditionalChineseTrack(track)) score -= 1;
   if (!isAiSubtitleTrack(track)) score += 10;
   return score;
 }
@@ -538,6 +543,7 @@ export function pickSubtitleTracks(subtitles) {
       .find(
         (s) =>
           isChineseSubtitleTrack(s) &&
+          !isTraditionalChineseTrack(s) &&
           s.subtitle_url !== primary.subtitle_url,
       ) ?? null;
   return { primary, secondary };
@@ -1139,7 +1145,9 @@ async function downloadStream(session, streamUrl, destPath, maxBytes) {
       Math.round(maxBytes / 1048576) + " MB cap)",
     );
   }
-  const handle = await open(destPath, "w");
+  // 写入 .part，完整写完再做原子 rename：中断/并发不会留下能被复用的半截文件
+  const partPath = destPath + ".part";
+  const handle = await open(partPath, "w");
   let total = 0;
   try {
     const reader = resp.body.getReader();
@@ -1152,11 +1160,16 @@ async function downloadStream(session, streamUrl, destPath, maxBytes) {
     }
   } catch (error) {
     await handle.close().catch(() => {});
-    await rm(destPath, { force: true }).catch(() => {});
+    await rm(partPath, { force: true }).catch(() => {});
     if (session.signal?.aborted) throw error;
     throw new Error("download interrupted: " + (error?.message ?? error));
   }
   await handle.close();
+  if (total <= 0) {
+    await rm(partPath, { force: true }).catch(() => {});
+    throw new Error("download produced an empty file");
+  }
+  await rename(partPath, destPath);
   return total;
 }
 
@@ -1665,26 +1678,36 @@ export function normalizeRequestedTimestamps(timestamps, duration, maxFrames, se
   }));
 }
 
-/** Transcript cache: avoid re-running ASR across the two-pass workflow (24h TTL). */
-async function readTranscriptCache(outDir) {
+/** Transcript cache: avoid re-running ASR across the two-pass workflow (7-day TTL).
+ *  条目带 config key（provider + 模型 + 语言）：换引擎后不能静默复用上一份文稿。 */
+export async function readTranscriptCache(outDir, cacheKey = "") {
   try {
     const info = await stat(join(outDir, "transcript.json"));
     if (Date.now() - info.mtimeMs >= TRANSCRIPT_CACHE_TTL_MS) return null;
     const parsed = JSON.parse(await readFile(join(outDir, "transcript.json"), "utf8"));
-    return parsed && typeof parsed.text === "string" && Array.isArray(parsed.segments) ? parsed : null;
+    if (!parsed || typeof parsed.text !== "string" || !Array.isArray(parsed.segments)) return null;
+    if (parsed.cache_key !== cacheKey) return null; // 引擎/模型/语言不同 → 视为未命中
+    const { cache_key: _ignored, ...rest } = parsed;
+    return rest;
   } catch {
     return null;
   }
 }
 
-async function writeTranscriptCache(outDir, transcript) {
+export async function writeTranscriptCache(outDir, transcript, cacheKey = "") {
   try {
     await mkdir(outDir, { recursive: true });
-    await writeFile(join(outDir, "transcript.json"), JSON.stringify(transcript), "utf8");
+    await writeFile(
+      join(outDir, "transcript.json"),
+      JSON.stringify({ ...transcript, cache_key: cacheKey }),
+      "utf8",
+    );
   } catch { /* best-effort */ }
 }
 
-/** Reuse a fresh cached copy of the downloaded video (same BV, same outDir). */
+/** Reuse a fresh cached copy of the downloaded video (same BV, same outDir).
+ *  只返回「完整写入」的文件（.part → rename 产物）：零字节文件、残留 .part
+ *  永远不会被当成有效缓存，否则后续 24h 的抽帧都会指向一个坏视频。 */
 async function findCachedVideo(outDir) {
   let entries = [];
   try { entries = await readdir(outDir); } catch { return null; }
@@ -1693,20 +1716,40 @@ async function findCachedVideo(outDir) {
     const path = join(outDir, name);
     try {
       const info = await stat(path);
-      if (Date.now() - info.mtimeMs < VIDEO_CACHE_TTL_MS) return path;
-      await rm(path, { force: true }); // stale cleanup
+      const fresh = Date.now() - info.mtimeMs < VIDEO_CACHE_TTL_MS;
+      if (name.endsWith(".part")) {
+        if (!fresh) await rm(path, { force: true }); // 残留的未完成下载
+        continue;
+      }
+      if (fresh && info.size > 0) return path;
+      if (!fresh) await rm(path, { force: true }); // stale cleanup
     } catch { /* ignore */ }
   }
   return null;
 }
 
+/** 同一视频的并发请求串行化：避免两个下载互相覆盖 .part / 抢 rename。 */
+const videoLocks = new Map();
+function withVideoLock(key, fn) {
+  const prev = videoLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => {});
+  videoLocks.set(key, tail);
+  tail.finally(() => {
+    if (videoLocks.get(key) === tail) videoLocks.delete(key);
+  });
+  return run;
+}
+
 /** Download the video into outDir unless a fresh cached copy already exists. */
 async function ensureVideo(session, streamUrl, outDir, maxBytes) {
-  const cached = await findCachedVideo(outDir);
-  if (cached) return { path: cached, bytes: 0, reused: true };
   const videoPath = join(outDir, "video" + guessStreamExt(streamUrl));
-  const bytes = await downloadStream(session, streamUrl, videoPath, maxBytes);
-  return { path: videoPath, bytes, reused: false };
+  return withVideoLock(videoPath, async () => {
+    const cached = await findCachedVideo(outDir);
+    if (cached) return { path: cached, bytes: 0, reused: true };
+    const bytes = await downloadStream(session, streamUrl, videoPath, maxBytes);
+    return { path: videoPath, bytes, reused: false };
+  });
 }
 
 /** Extract frames from a LOCAL video file: fast, accurate, repeatable. */
@@ -1898,10 +1941,11 @@ export async function extractAll(options) {
     }
   }
 
-  // 无字幕轨 → ASR 兜底：默认必剪（bcut），可切 sherpa-onnx（中文推荐）/whisper-local；auto 依次降级 必剪→sherpa→whisper；文稿 24h 缓存
+  // 无字幕轨 → ASR 兜底：默认必剪（bcut），可切 sherpa-onnx（中文推荐）/whisper-local；auto 依次降级 必剪→sherpa→whisper；文稿 7 天缓存
   const provider = asrProvider ?? (asrFallback === false ? "none" : "bcut");
   if (provider !== "none" && subtitle.text.length === 0 && subtitle.source === "none") {
-    const cachedTranscript = await readTranscriptCache(outDir);
+    const transcriptCacheKey = [provider, whisperModel, whisperLanguage, sherpaModelType, sherpaModel].join("|");
+    const cachedTranscript = await readTranscriptCache(outDir, transcriptCacheKey);
     if (cachedTranscript) {
       subtitle = cachedTranscript;
     } else {
@@ -1972,7 +2016,7 @@ export async function extractAll(options) {
       }, emptySubtitle);
       if (asr.text) {
         subtitle = asr;
-        await writeTranscriptCache(outDir, asr);
+        await writeTranscriptCache(outDir, asr, transcriptCacheKey);
       } else if (subtitle.note) {
         subtitle = { ...subtitle, note: subtitle.note + " | ASR fallback failed: " + (asr.note ?? "") };
       }
@@ -2089,8 +2133,13 @@ export async function extractAll(options) {
         frames.strategy = "no timestamps selected";
       }
     } catch (error) {
-      frames.enabled = false;
+      // 保留 enabled=true 并附上原因：否则 formatExtraction 不渲染 Keyframes 段，
+      // 模型会误以为「这视频没有画面」，而真实原因是下载/ffmpeg 失败。
+      frames.enabled = true;
+      frames.frames = [];
+      frames.strategy = frames.strategy || "failed";
       frames.error = String(error?.message ?? error);
+      frames.note = "抓帧失败；可用 timestamps 指定时刻重试，或稍后重试（下载/ffmpeg 可能超时）";
     }
   }
 

@@ -6,7 +6,9 @@
  * see THIRD_PARTY_NOTICES.md.
  *
  * Credentials are stored as plaintext JSON at <plugin root>/.sessdata.json
- * (git-ignored, owner-only 0600). Never return the raw SESSDATA to the caller.
+ * (git-ignored; POSIX chmod 0600, Windows icacls owner-only — Windows ignores
+ * the POSIX mode bits, so the ACL is what actually protects the file). Never
+ * return the raw SESSDATA to the caller.
  *
  * The QR code is rendered locally (qrcode package): the login URL carries the
  * qrcode_key, and anyone holding it could poll for the cookies after the user
@@ -14,6 +16,7 @@
  *
  * @module dsh-bilibili/login
  */
+import { spawn } from "node:child_process";
 import { chmod, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,10 +35,34 @@ const HEADERS = {
   Referer: "https://www.bilibili.com/",
 };
 
-/** Write a credential-bearing file readable by the owner only. */
+/** Write a credential-bearing file readable by the owner only.
+ *  POSIX: chmod 0600. Windows: chmod only toggles the read-only bit, so use
+ *  icacls to drop inherited ACEs and grant the current user only. */
 async function writePrivateFile(path, text) {
   await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
   await chmod(path, 0o600).catch(() => {}); // mode only applies on create; tighten pre-existing files too
+  if (process.platform === "win32") await tightenWindowsAcl(path);
+}
+
+/** Best-effort Windows ACL tighten: remove inheritance, keep only the current user. */
+function tightenWindowsAcl(path) {
+  return new Promise((resolve) => {
+    const user = process.env.USERNAME || process.env.USER || "";
+    if (!user) {
+      resolve();
+      return;
+    }
+    try {
+      const child = spawn("icacls", [path, "/inheritance:r", "/grant:r", user + ":F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.on("error", () => resolve());
+      child.on("close", () => resolve());
+    } catch {
+      resolve();
+    }
+  });
 }
 
 /** Generate a login QR code locally: scan URL, a text (Unicode block) rendering and a local PNG path. */
@@ -51,6 +78,7 @@ export async function startQrLogin() {
   try {
     await QRCode.toFile(QR_PNG_FILE, url, { margin: 2, width: 320 });
     await chmod(QR_PNG_FILE, 0o600).catch(() => {}); // the QR encodes the qrcode_key too
+    if (process.platform === "win32") await tightenWindowsAcl(QR_PNG_FILE);
     savedPath = QR_PNG_FILE;
   } catch {
     // local PNG save is best-effort; the text rendering still works

@@ -341,7 +341,7 @@ export function formatExtraction(value) {
     if (frames.mode) out.push("capture mode: " + frames.mode + (frames.note ? " — " + frames.note : ""));
     const list = frames.frames ?? [];
     if (list.length === 0) {
-      out.push("No frames captured." + (frames.error ? " Error: " + frames.error : ""));
+      out.push("No frames captured." + (frames.error ? " Error: " + frames.error : "") + (frames.note ? " — " + frames.note : ""));
     } else {
       for (const frame of list) {
         let line = "  frame " + formatTime(frame.time) + " | reason: " + frame.reason;

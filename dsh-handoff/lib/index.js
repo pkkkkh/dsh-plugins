@@ -1,7 +1,7 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import Schema from "@deepseek-ai/schemastery";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 // src/config.ts
 /**
 * Plain configuration. These are ordinary profile-entry values: a change is
@@ -394,12 +394,16 @@ function resolveOutputDir(cwd, configured) {
 function assertBareName(name) {
 	if (name === "" || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) throw new HandoffError("BAD_NAME", `非法的文件名：${name}`);
 }
-/** Write one document, creating the directory when needed. */
+/** Write one document, creating the directory when needed.
+*  Write to a temporary file first and rename it into place: a crash or a
+*  failed write must never leave a half-written handoff document behind. */
 async function writeDocument(dir, name, content) {
 	assertBareName(name);
 	await mkdir(dir, { recursive: true });
 	const target = join(dir, name);
-	await writeFile(target, content, "utf8");
+	const temp = target + ".tmp";
+	await writeFile(temp, content, "utf8");
+	await rename(temp, target);
 	return target;
 }
 /** Newest documents first, without the `latest.md` convenience copy. */
@@ -413,16 +417,18 @@ async function listDocuments(dir, limit = 50) {
 	}
 	const entries = [];
 	for (const name of names) {
-		if (!name.endsWith(".md") || name === "latest.md") continue;
+		if (!name.endsWith(".md") || name === "latest.md" || name.endsWith(".tmp")) continue;
 		const path = join(dir, name);
-		const info = await stat(path);
-		if (!info.isFile()) continue;
-		entries.push({
-			name,
-			path,
-			size: info.size,
-			modifiedAt: info.mtimeMs
-		});
+		try {
+			const info = await stat(path);
+			if (!info.isFile()) continue;
+			entries.push({
+				name,
+				path,
+				size: info.size,
+				modifiedAt: info.mtimeMs
+			});
+		} catch {}
 	}
 	entries.sort((a, b) => b.modifiedAt - a.modifiedAt);
 	return entries.slice(0, limit);

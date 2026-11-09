@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import { selectKeyframeTimestamps, formatTime } from "../lib/keyframes.js";
 import { parseSubtitleBody, nearestSubtitleText, guessStreamExt, parseWhisperTime, parseWhisperJson, resolveWhisperModel, parseSherpaText, parseSherpaResults, buildWhisperArgs, buildSherpaArgs, resolveVisionModel, buildVisionRequest, parseChatCompletion, DEFAULT_VISION_PROMPT, resolveVisionBaseUrl, resolveVisionPrompt, parseCitationHint, VISION_PROMPT_SHORT, pickNearestPeak, parseBlurMetadata, normalizeRequestedTimestamps, isEmptySubtitleList, retryWhileEmpty, EMPTY_SUBTITLE_RETRY_DELAYS, mergeSubtitleLists, lacksManualChineseTrack } from "../lib/extractor.js";
 import { formatExtraction, capTranscriptSmart, pickDanmakuPeaks, formatEnvironment, renderEnvReport } from "../lib/format.js";
-import { summarizeChecks, ASR_PROVIDERS } from "../lib/envcheck.js";
+import { summarizeChecks, ASR_PROVIDERS, spawnCheck } from "../lib/envcheck.js";
 import { buildDigest } from "../lib/digest.js";
-import { __test__ as extractorInternals, pickSubtitleTracks, crossCheckTranscripts, lcsRatio, isAiSubtitleTrack } from "../lib/extractor.js";
+import { __test__ as extractorInternals, pickSubtitleTracks, crossCheckTranscripts, lcsRatio, isAiSubtitleTrack, readTranscriptCache, writeTranscriptCache } from "../lib/extractor.js";
 import { detectAdSegments } from "../lib/ads.js";
 import { probeTranscript } from "../lib/channel.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -789,4 +789,63 @@ test("lacksManualChineseTrack：只有 AI 中文轨时才值得再探人工轨",
   const enOnly = { code: 0, data: { subtitle: { subtitles: [{ lan: "ai-en", ai_status: 2 }] } } };
   assert.equal(lacksManualChineseTrack(enOnly), false, "没有中文轨就不探");
   assert.equal(lacksManualChineseTrack({ code: -1 }), false);
+});
+
+test("pickSubtitleTracks：参考轨排除繁体轨（简繁差异不是错字）", () => {
+  const list = [
+    { lan: "zh-Hans", lan_name: "中文（简体）", subtitle_url: "//hans" },
+    { lan: "zh-Hant", lan_name: "中文（繁體）", subtitle_url: "//hant" },
+  ];
+  const picked = pickSubtitleTracks(list);
+  assert.equal(picked.primary.lan, "zh-Hans");
+  assert.equal(picked.secondary, null, "繁体轨不能当参考轨");
+});
+
+test("文稿缓存：换 ASR 引擎后不能复用旧文稿", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dsh-bili-cache-"));
+  try {
+    const transcript = {
+      text: "导出的文稿",
+      segments: [{ start: 0, end: 1, text: "导出的文稿" }],
+    };
+    await writeTranscriptCache(dir, transcript, "bcut|medium|zh|sense-voice|");
+    const hit = await readTranscriptCache(dir, "bcut|medium|zh|sense-voice|");
+    assert.equal(hit.text, "导出的文稿");
+    assert.equal("cache_key" in hit, false, "cache_key 不应泄漏到结果里");
+    const miss = await readTranscriptCache(dir, "sherpa-onnx|medium|zh|sense-voice|");
+    assert.equal(miss, null, "引擎不同必须未命中");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("formatExtraction：抓帧失败要显式告诉模型（不再静默省略 Keyframes 段）", () => {
+  const text = formatExtraction({
+    success: true,
+    metadata: { title: "t", bvid: "BV1xx411c7mD", duration: 60 },
+    transcript: { source: "subtitle", text: "hello", segments: [] },
+    comments: { fetched: 0, total: 0, comments: [] },
+    frames: {
+      enabled: true,
+      strategy: "failed",
+      mode: "none",
+      frames: [],
+      error: "ffmpeg exited with code 1",
+      note: "稍后重试",
+    },
+  });
+  assert.match(text, /Keyframes/);
+  assert.match(text, /ffmpeg exited with code 1/);
+  assert.match(text, /稍后重试/);
+});
+
+test("spawnCheck：卡住的二进制会被超时 kill 掉", async () => {
+  const started = Date.now();
+  const state = await spawnCheck(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], 300);
+  assert.equal(state, "error");
+  assert.ok(Date.now() - started < 5000, "应在超时后立刻返回，而不是等进程自己退出");
+});
+
+test("spawnCheck：不存在的二进制是 missing", async () => {
+  assert.equal(await spawnCheck("definitely-not-a-real-binary-xyz", ["--help"], 1000), "missing");
 });
