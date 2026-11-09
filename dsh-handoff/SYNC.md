@@ -10,7 +10,9 @@
 
 > **2026-11-09 起 DSH 的 home 切到了 `D:\dsh-home`**，所以本机运行时是
 > `D:\dsh-home\profiles\desktop\node_modules\dsh-handoff`。
-> 下面的命令统一用 `$home` 自动解析，别写死 C 盘（C 上那份是旧副本）。
+> 同一时间 profile 改用 **`link:`** 安装：运行时是**指向本目录的 junction**，
+> 所以 `pnpm build` 之后**直接重启即可，不用再手动 copy**（下面的「同步到运行时」只在非 link 安装时才需要）。
+> 命令统一用 `$home` 自动解析，别写死 C 盘（C 上那份是旧副本）。
 
 ## 改代码的标准流程
 
@@ -29,7 +31,10 @@ cd C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-handoff
 & $node $pnpm typecheck    # 可选，改类型时跑
 ```
 
-## 同步到运行时
+## 同步到运行时（只在 profile 不是 link 安装时才需要）
+
+> 2026-11-09 起 profile 用 `link:` 安装，运行时就是本目录的 junction —— **build 完重启即可，跳过这一节**。
+> 下面这段是给「哪天又变回 `file:` 复制安装」准备的兜底。
 
 ```powershell
 $home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
@@ -62,5 +67,5 @@ Copy-Item "$src\package.json","$src\cordis.patch.yml" $dst -Force
 ## 说明
 
 - 本目录是**自用维护版**（0.4.0）：派生自 [zhenbang1216/dsh-handoff](https://github.com/zhenbang1216/dsh-handoff)（上游 main 还是 0.3.0），加了客户端整页面板、`/api/dsh-handoff/*` 接口、版本/续写、工具活动清单、`/attach` 接续等；MIT 协议。
-- `../vendor/dsh-handoff` 是**安装用的副本**（profile 的 `file:` 依赖指向它），内容与本目录一致（只差本 SYNC.md）。改代码以本目录为准，构建后按上面同步到运行时。
+- `../vendor/dsh-handoff` 是旧安装方式的副本，**已不再被 profile 使用**（2026-11-09 改为 `link:` 到本目录），仅留作备份；内容与本目录一致（只差本 SYNC.md）。
 - 与 `../dsh-bilibili` 不同：那个是纯 JS、改 `lib/*.js` 直接生效；这个必须走 `pnpm build`。
