@@ -1,21 +1,20 @@
 # 改完记得同步（重要）
 
-这个目录是 **源码副本**，运行时真正加载的不是它，而是：
+**2026-11-09 起本目录就是运行时本身**：profile 用 `link:` 安装，`node_modules/dsh-bilibili` 是指向这里的 junction。
 
 ```
-运行时：$DSH_HOME\profiles\desktop\node_modules\dsh-bilibili\lib
-源码：  C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili\lib
+运行时：$DSH_HOME\profiles\desktop\node_modules\dsh-bilibili  →  本目录
+源码/产物：C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili
 ```
 
-> **2026-11-09 起 DSH 的 home 切到了 `D:\dsh-home`**，所以本机现在的运行时是
-> `D:\dsh-home\profiles\desktop\node_modules\dsh-bilibili\lib`。
-> 下面的命令统一用 `$home` 自动解析，别写死 C 盘 —— C 上那份已经是旧副本，改了不生效。
+所以改完 `lib/*.js` **直接重启 DSH 即可，不用再复制**（校验脚本也看不出差异，因为两边是同一份）。
+C 盘 `~/.dsh` 里的那份是旧副本，改了不生效，别去改它。
 
-**所有 `lib/*.js` 都是独立副本，改哪个就同步哪个。**
-以前 `envcheck.js` / `login.js` / `index.js` 与运行时是硬链接（改一份等于改两份）；
-2026-11-09 换 home 后硬链接已断，这条捷径没有了。
+`$DSH_HOME` 本机 = `D:\dsh-home`（2026-11-09 从 C 盘切过来）。
 
-## 同步
+## 同步（只在 profile 不是 link 安装时才需要）
+
+> 现在是 junction，**跳过这一节**。下面是「哪天又变回 `file:` 复制安装」时的兜底。
 
 ```powershell
 $home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
@@ -63,6 +62,12 @@ Remove-Item "$P\test" -Recurse -Force
 | `DSH_BILIBILI_DIGEST` / `_RATIO` / `DSH_BILIBILI_CHANNEL` | — | 关闭骨架 / 调整压缩比 / 关闭通道探针 |
 | `DSH_BILIBILI_ADS` | 开 | 置 0 关闭商单识别与折叠 |
 | `cross_check`（工具参数）/ `crossCheckAsr`（配置） | 关 | 第二路 ASR（必剪）交叉校验，约多花 10–60 秒 |
+
+## 运行时文件（junction 后就在本目录）
+
+- `.sessdata.json` / `.qr-login.png`：登录凭证，**在本目录里**（`.gitignore` 已排除，别提交、别删）；
+- `.envcheck.json`：环境体检缓存（同样不入库）；
+- profile 里的旧副本留在 `node_modules\dsh-bilibili.old`，稳定几天后可以删。
 
 ## 回滚
 
