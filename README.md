@@ -2,18 +2,17 @@
 
 按「一个子目录 = 一个插件」组织。每个子目录都是独立、可单独安装的 DeepSeek Harness 插件。
 
+> 本仓库是**自己在用的维护版**：`dsh-bilibili` 不只是跟随上游，功能按我们的需要持续加、bug 我们自己修。
+
 | 目录 | 插件 | 版本 | 说明 |
 |---|---|---|---|
-| [`dsh-bilibili/`](dsh-bilibili/) | dsh-bilibili | 0.8.0 | B 站视频分析：文稿骨架、通道探针、交叉校验、商单折叠、定点抓帧 |
+| [`dsh-bilibili/`](dsh-bilibili/) | dsh-bilibili | 0.8.1 | B 站视频分析：文稿骨架、通道探针、交叉校验、商单折叠、定点抓帧 |
 | [`dsh-handoff/`](dsh-handoff/) | dsh-handoff | 0.4.0 | 把当前会话整理成交接文档，交给下一个会话接着干 |
 
 ## 安装到 DSH
 
-把对应子目录整个放到 DSH 的插件目录，然后重启 DSH。Windows 下通常是：
-
-```
-C:\Users\<你>\.dsh\profiles\desktop\node_modules\<插件名>
-```
+把对应子目录整个放到 DSH 的插件目录（`$DSH_HOME/profiles/desktop/node_modules/<插件名>`），然后重启 DSH。
+本机的 `$DSH_HOME` 是 `D:\dsh-home`（2026-11-09 从 C 盘切换过来）。
 
 `dsh-bilibili` 的 `lib/` 改动需要手动同步到运行时目录才生效，细节见 `dsh-bilibili/SYNC.md`。
 

@@ -3,20 +3,27 @@
 这个目录是 **源码副本**，运行时真正加载的不是它，而是：
 
 ```
-运行时：C:\Users\kh006\.dsh\profiles\desktop\node_modules\dsh-bilibili\lib
+运行时：$DSH_HOME\profiles\desktop\node_modules\dsh-bilibili\lib
 源码：  C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili\lib
 ```
 
-两份文件里，`envcheck.js` / `login.js` / `index.js` 是硬链接（改一份等于改两份）；
-**`digest.js` / `channel.js` / `format.js` / `ads.js` / `keyframes.js` / `extractor.js` 是各自独立的副本**，
-改完必须手动同步，否则 DSH 跑的还是旧代码。
+> **2026-11-09 起 DSH 的 home 切到了 `D:\dsh-home`**，所以本机现在的运行时是
+> `D:\dsh-home\profiles\desktop\node_modules\dsh-bilibili\lib`。
+> 下面的命令统一用 `$home` 自动解析，别写死 C 盘 —— C 上那份已经是旧副本，改了不生效。
+
+**所有 `lib/*.js` 都是独立副本，改哪个就同步哪个。**
+以前 `envcheck.js` / `login.js` / `index.js` 与运行时是硬链接（改一份等于改两份）；
+2026-11-09 换 home 后硬链接已断，这条捷径没有了。
 
 ## 同步
 
 ```powershell
-$src = "C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili\lib"
-$dst = "C:\Users\kh006\.dsh\profiles\desktop\node_modules\dsh-bilibili\lib"
-Copy-Item "$src\digest.js","$src\channel.js","$src\format.js","$src\ads.js","$src\keyframes.js","$src\extractor.js" $dst -Force
+$home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+$src  = "C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili\lib"
+$dst  = Join-Path $home "profiles\desktop\node_modules\dsh-bilibili\lib"
+
+# 全量同步（最稳，别只挑这几个文件）
+Copy-Item "$src\*.js" $dst -Force
 ```
 
 同步后需要重启 DSH 才会重新加载模块。
@@ -28,16 +35,20 @@ Copy-Item "$src\digest.js","$src\channel.js","$src\format.js","$src\ads.js","$sr
   "C:\Users\kh006\.dsh\im\scripts\check-bilibili.mjs"
 ```
 
-会做两件事：比对两份文件是否一致（不一致直接报红）、跑 digest/channel 的功能用例。退出码 0 = 通过。
+脚本读 `DSH_HOME` 自动定位运行时（切 home 后不用改），会先**打印解析出的运行时目录**，
+再比对两份文件是否逐字节一致、跑 digest/channel 的功能用例。退出码 0 = 通过。
 
 ## 单元测试（58 项）
 
 工作区没有装依赖（`login.js` 依赖 `qrcode`），所以**测试只能在装机目录跑**：
 
 ```powershell
-$P = "C:\Users\kh006\.dsh\profiles\desktop\node_modules\dsh-bilibili"
+$home = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+$P = Join-Path $home "profiles\desktop\node_modules\dsh-bilibili"
 Copy-Item "C:\Users\kh006\.dsh\im\apps\dsh-bilibili\dsh-bilibili\test" "$P\test" -Recurse -Force
-& "D:\DSH\resources\runtime\primary-runtime\dependencies\node\bin\node.exe" --test --test-reporter=dot   # 在 $P 下执行
+Push-Location $P
+& "D:\DSH\resources\runtime\primary-runtime\dependencies\node\bin\node.exe" --test --test-reporter=dot
+Pop-Location
 Remove-Item "$P\test" -Recurse -Force
 ```
 
@@ -55,5 +66,6 @@ Remove-Item "$P\test" -Recurse -Force
 
 ## 回滚
 
-改动前的原版备份在运行时目录里：`node_modules\dsh-bilibili\lib.bak-20261105\`
-（注意：**不在**本工作区，交接文档里写的位置有歧义）。
+2026-11-05 的 `lib.bak-20261105` 已经清理（C、D 两边的运行时里都没有了）。
+要回滚只能重新从上游 [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) 拉对应版本，
+再把本仓库的修改重新打上。
