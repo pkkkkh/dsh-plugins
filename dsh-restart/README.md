@@ -41,11 +41,13 @@ T+56+   DSH 起来 → 插件 apply() → 3 秒后读 marker
 restart_dsh({
   confirm: true,
   delay_seconds: 120,
-  start_script: "C:\\Users\\kh006\\.dsh\\im\\scripts\\restart-dsh-maint-start.cmd",
+  start_script: "<IM 工作区>/scripts/restart-dsh-maint-start.cmd",
   watch_seconds: 600,
   reason: "装了新插件"
 })
 ```
+
+（本机的 `<IM 工作区>` 是 `C:\Users\kh006\.dsh\im`。）
 
 `restart-dsh-maint-start.cmd` 做四件事：
 `pnpm install` → 验 `@dsh-ops` 还在（不在就从 C 旧 profile robocopy）→ 写问候 marker → 拉起 DSH。
@@ -83,6 +85,10 @@ restart_dsh({
 | `announceFile` | `logs/restart-announce.json` | marker 路径 |
 | `announceBotId` / `announceTargetId` | 空 | 留空 = 自动挑第一个有目标的机器人 |
 
+> 路径约定：表里的 `scripts/` 与 `logs/` 都相对于 **IM 工作区**（本机 `C:\Users\kh006\.dsh\im`）。
+> 换机器/换目录时改 `cordis.patch.yml` 里的 `armScript` / `maintArmScript` / `tasksScript` / `logFile` / `announceFile`，
+> 脚本里的绝对路径也要跟着改（脚本按 ASCII + 绝对路径写死，是为了避免工作目录漂移）。
+
 ## 日志
 
 | 文件 | 内容 |
@@ -103,7 +109,7 @@ restart_dsh({
 ## 测试
 
 ```powershell
-cd apps/dsh-restart
+cd dsh-restart
 node --test test/args.test.mjs test/announce.test.mjs test/timings.test.mjs
 ```
 
@@ -112,14 +118,20 @@ node --test test/args.test.mjs test/announce.test.mjs test/timings.test.mjs
 真实宿主模块下的冒烟（用 app.asar 里的 `defineTool`）：
 
 ```powershell
-ELECTRON_RUN_AS_NODE=1 "D:/DSH/DeepSeek Harness.exe" --expose-internals run.mjs
+ELECTRON_RUN_AS_NODE=1 "<DSH 安装目录>/DeepSeek Harness.exe" --expose-internals run.mjs
 ```
 
 ## 安装（需要停 DSH 再 pnpm）
 
 ```
-dependencies 加 "dsh-restart": "link:C:/Users/kh006/.dsh/im/apps/dsh-restart"
+# 1. 把本目录放到 <插件安装目录>（建议 junction 到仓库，改源码即生效）
+profiles/<profile>/node_modules/dsh-restart  →  <仓库目录>/dsh-restart
+
+# 2. profiles/<profile>/package.json
+dependencies 加 "dsh-restart": "link:<仓库目录>/dsh-restart"
 dsh.profile.bundles 加 "dsh-restart"
+
+# 3. 重启 DSH
 ```
 
 **`peerDependencies` 必须声明** `@deepseek-ai/cordis`、`dsh-tools`、`schemastery`，否则 link 安装的插件
