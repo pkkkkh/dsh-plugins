@@ -1,0 +1,31 @@
+# dsh-restart — bundle patch.
+# This row is what gets inserted into the profile tree. Override any field in
+# profiles/desktop/cordis.patch.yml (later layers win).
+- insert:
+    - id: dsh-restart
+      name: 'dsh-restart'
+      config:
+        # The vetted restart scripts live in the IM workspace (ASCII only,
+        # start-task-first ordering, rollback on partial registration).
+        armScript: 'C:/Users/kh006/.dsh/im/scripts/restart-dsh-arm.ps1'
+        # Strict superset used only when a caller passes start_script and/or
+        # watch_seconds (maintenance runs: pnpm install inside the start half).
+        maintArmScript: 'C:/Users/kh006/.dsh/im/scripts/restart-dsh-arm2.ps1'
+        # Status / cancel helper for the DSH-Restart-* tasks.
+        tasksScript: 'C:/Users/kh006/.dsh/im/scripts/dsh-restart-tasks.ps1'
+        logFile: 'C:/Users/kh006/.dsh/im/logs/restart-dsh.log'
+        powershell: 'powershell.exe'
+        # Default delay before DSH is killed; the start task fires 11s later.
+        defaultKillSeconds: 45
+        # ── 「我回来啦」播报 ──────────────────────────────────────────────
+        # 计划重启时写一个 marker；下次 DSH 起来后插件读 marker，用 IM 主动投递
+        # 发一句问候，然后删 marker。非计划启动（没有 marker）不会说话。
+        announce: true
+        announceText: '咕噜～本鱼回来啦，尾巴甩甩，满血复活！'
+        announceMaxAgeMinutes: 30
+        announceFile: 'C:/Users/kh006/.dsh/im/logs/restart-announce.json'
+        # 留空 = 自动挑第一个在线机器人 / 它的第一个投递目标；
+        # 一个目标都没有时，自动把「最近聊过的会话」提升成 restart-hello 目标。
+        announceBotId: ''
+        announceTargetId: ''
+        announceAutoTarget: true
