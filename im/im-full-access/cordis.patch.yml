@@ -1,0 +1,31 @@
+# im-full-access — bundle patch.
+# This row is what gets inserted into the profile tree. Override any field in
+# profiles/desktop/cordis.patch.yml (later layers win).
+- insert:
+    - id: im-full-access
+      name: 'im-full-access'
+      config:
+        # 开给这些会话的权限模式：danger-full-access / workspace-write / read-only
+        mode: 'danger-full-access'
+        # 审批策略：never = 不再弹审批（与界面「完全访问」一致）；ask = 保留审批；留空 = 不动
+        approval: 'never'
+        # 通道白名单：会话标题以「通道名 + 分隔符」开头就开权限（跟工作区在哪儿无关）
+        # dsh-im 的标题形如「微信 · 对话4」「QQ · 对话1」
+        # 分隔符是必须的：标题「微信小程序开发」这种桌面会话不会被误判
+        channels: ['微信', 'QQ', '飞书', '企业微信', '钉钉', 'Telegram']
+        # 工作区白名单：会话的 cwd 命中这些目录就开权限（跟来源无关）
+        # 只留 IM 工作区：原本想当兜底 —— IM 会话都开在这里，首条用户消息就授权，
+        # 不用等模型生成标题（标题万一没生成也不会漏）。
+        # 桌面工作区（如 D:\dsh工作区）**故意不列**：桌面会话一律手动切权限。
+        #
+        # ⚠️ 2026-11-08 实测：这条「兜底」在真实新会话里**没有触发**
+        #    （应由 seq 8 的首条用户消息授权，实际等到 seq 16 标题出现才走通道规则）。
+        #    通道规则本身每次都成功，所以不影响使用；这条留着无害，但**不要依赖它**。
+        #    真要排查：在插件里打印 session.header.cwd 看那一刻有没有值。
+        #
+        # 注意：路径一律用正斜杠 /。YAML 单引号里的反斜杠不会被转义，
+        # 写成 'C:\\Users\\...' 会得到两个反斜杠的字符串，匹配不上（2026-11-08 踩过）。
+        workspaces:
+          - 'C:/Users/kh006/.dsh/im'
+        # true = 白名单目录的子目录也算；false = 只认目录本身
+        recursive: true

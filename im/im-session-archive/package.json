@@ -1,0 +1,19 @@
+{
+  "name": "im-session-archive",
+  "version": "0.2.0",
+  "description": "Archive previous IM-channel sessions and keep one continuously-updated long-term context handoff for the IM workspace.",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "test": "node --test test/longterm.test.mjs test/integration.test.mjs",
+    "seed": "node scripts/seed-longterm.mjs",
+    "sync": "node scripts/sync-to-profile.mjs"
+  },
+  "license": "MIT",
+  "keywords": ["dsh-plugin", "im", "session", "archive", "handoff"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "im-full-access",
+  "version": "0.1.0",
+  "description": "Grant DSH full file access to IM-channel sessions (WeChat/QQ/Feishu...) and/or whitelisted workspaces, leaving desktop sessions untouched.",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "keywords": ["dsh-plugin", "permission", "sandbox", "im"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

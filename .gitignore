@@ -1,0 +1,8 @@
+# 本地备份 / 运行时产物，不进仓库
+*.bak-*
+*.old
+node_modules/
+logs/
+.envcheck.json
+.qr-login.png
+.sessdata.json

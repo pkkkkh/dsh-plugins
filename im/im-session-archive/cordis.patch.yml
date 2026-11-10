@@ -1,0 +1,58 @@
+# im-session-archive — bundle patch.
+- insert:
+    - id: im-session-archive
+      name: 'im-session-archive'
+      config:
+        # 只有以这些「通道名 + 分隔符」开头的会话才算 IM 会话；别的渠道一律不碰。
+        # 以后接新机器人，加个词就行，代码不用改。
+        channels: ['微信', 'QQ', '飞书', '企业微信', '钉钉', 'Telegram']
+
+        # IM 会话的工作区（决定去哪个 sessions 目录找兄弟会话）
+        imWorkspace: 'C:/Users/kh006/.dsh/im'
+
+        # DSH 的 home：插件进程里 process.env.DSH_HOME 可能拿不到（实测读到 C 旧 home），
+        # 2026-11-09 15:06 起显式写死；换 home 时记得同步改这里。
+        dshHome: 'D:/dsh-home'
+
+        # 每个通道保留最近的几个不归档（默认 1 = 只留最新的）
+        keep: 1
+
+        # true = 只写日志不真归档。第一次上线先干跑，看日志确认规则对了再改 false。
+        dryRun: false
+
+        # 归档动作的日志
+        logFile: 'C:/Users/kh006/.dsh/im/logs/im-archive.log'
+
+        # ── 长期上下文（自动记忆）──────────────────────────────────────
+        # 2026-11-09 起：不再写「最后一段会话」的一次性快照，改成一份跨会话累积、
+        # 且每轮自动刷新的长期上下文（长期状态 + 会话时间线）。
+        # 2026-11-09 14:30 起：搬出 .dsh/handoff/，独立到 .dsh/memory/ ——
+        #   .dsh/handoff/ 只放人工交接文档（dsh-handoff），两者不再混放。
+        autoHandoff: true
+        # 单次会话快照（审计 / 回看用）；长期上下文才是主入口
+        handoffDir: 'C:/Users/kh006/.dsh/im/.dsh/memory/auto'
+        # 长期上下文正文：新会话开局读的就是这一份
+        handoffLatest: 'C:/Users/kh006/.dsh/im/.dsh/memory/LONGTERM.md'
+        # 不再写镜像（旧的 .dsh/handoff/AUTO-latest.md 已迁到 memory/AUTO-latest.legacy.md）
+        handoffMirror: ''
+        # 结构化事实源（JSON）；删了也能靠 scripts/seed-longterm.mjs 从 projcache 重建
+        handoffState: 'C:/Users/kh006/.dsh/im/.dsh/memory/longterm-state.json'
+        # 时间线最多保留多少段会话（更早的滚出，完整历史看 auto/ 与人工交接文档）
+        maxSessions: 30
+        # ── 新会话开局自动交接（2026-11-09 加）──────────────────────────
+        # 微信 /new 后新会话创建时：把上一段会话写成文档 + 摘要注入新对话
+        # 2026-11-09 15:5x 临时关闭：agent.inject 会和 IM 桥的 turn 状态打架，
+        # 表现为新会话第 3、4 轮完全不运行（prompt 有、response 空、steps 不涨）。
+        # 先关掉保证微信可用；等找到不碰 append 的注入方式再开。
+        injectOnNewSession: false
+        # 自动交接文档落点（这个目录里是自动生成的，别和人工 handoff 文档混）
+        injectDocDir: 'C:/Users/kh006/.dsh/im/.dsh/handoff/auto'
+        # 注入正文的最大字符数（控制 token）
+        injectMaxChars: 1800
+        # 轮询兜底间隔（毫秒）：事件收不到时靠它保证「一直更新」+「新会话注入」
+        pollMs: 8000
+        # 文档标题里显示的通道名（写死一个通用名就行）
+        contextTitle: 'IM 工作区'
+        # 是否往系统提示里注入「读 + 维护长期上下文」的规则。
+        # 出问题时可以单独关掉它（归档功能不受影响），不用回滚整个插件。
+        promptInjection: true
