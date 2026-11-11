@@ -1,0 +1,30 @@
+{
+  "name": "video-toolbox",
+  "version": "0.1.0",
+  "description": "视频工具箱聚合入口：一个 video_toolbox 工具，按 action 转调 dsh-ffmpeg / dsh-media-converter / dsh-audio-tools。",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "video",
+    "ffmpeg"
+  ]
+}
