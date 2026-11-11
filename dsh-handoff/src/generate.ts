@@ -161,6 +161,8 @@ async function streamText(
  */
 export async function generateHandoff(input: GenerateInput): Promise<GenerateResult> {
   const { ctx, session, config } = input
+  // Automatic callers have no human focus; treat it as empty rather than undefined.
+  const focus = (input.focus ?? '').trim()
   const messages = session.deriveMessages()
   if (messages.length === 0) throw new HandoffError('EMPTY_SESSION', '当前会话还没有任何消息。')
 
@@ -187,7 +189,7 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
     createdAt,
     model: `${route.provider}/${route.model}`,
     messageCount: messages.length,
-    focus: input.focus,
+    focus,
     extraInstructions: config.extraInstructions,
     transcript: transcript.text,
     truncated: transcript.stats.truncated,
@@ -243,13 +245,13 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
       provider: route.provider,
       model: route.model,
       messages: messages.length,
-      ...(input.focus === '' ? {} : { focus: input.focus }),
+      ...(focus === '' ? {} : { focus }),
       generator: GENERATOR,
     },
     body,
   )
 
-  const fileName = documentFileName(config.filenamePrefix, now, slugify(input.focus === '' ? title : input.focus))
+  const fileName = documentFileName(config.filenamePrefix, now, slugify(focus === '' ? title : focus))
   const path = await writeDocument(dir, fileName, markdown)
   if (config.writeLatest) {
     const pointer = renderLatestPointer({ name: fileName, version: chain.version, updatedAt: createdAt })

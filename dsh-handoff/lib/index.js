@@ -1,32 +1,8 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import Schema from "@deepseek-ai/schemastery";
+import { appendFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
-// src/config.ts
-/**
-* Plain configuration. These are ordinary profile-entry values: a change is
-* saved to the profile patch and takes effect on the next mount, which is the
-* right granularity for a batch job like this one. (`volatile()` is for config
-* references and would turn every value into a reference object.)
-*/
-const Config = Schema.object({
-	outputDir: Schema.string().default(".dsh/handoff").description("生成目录，相对于会话工作目录。"),
-	filenamePrefix: Schema.string().default("handoff").description("文件名前缀，例如 handoff-20261025-2140-xxx.md。"),
-	writeLatest: Schema.boolean().default(true).description("同时写一份 latest.md，方便下一个会话直接读取。"),
-	provider: Schema.string().default("").description("模型 provider；与 model 同时填写才生效，否则沿用会话当前模型。"),
-	model: Schema.string().default("").description("模型 id；与 provider 同时填写才生效。"),
-	maxInputChars: Schema.number().default(48e3).min(4e3).description("会话记录的字符预算，超出时省略中间部分。"),
-	maxOutputTokens: Schema.number().default(4096).min(512).description("生成交接文档的输出 token 上限。"),
-	includeToolResults: Schema.boolean().default(true).description("把工具结果写入会话记录（整段截断）。"),
-	includeInjectedContext: Schema.boolean().default(false).description("把宿主注入的上下文（技能目录、工作区说明等）也写进记录；默认排除，避免挤占预算。"),
-	includeReasoning: Schema.boolean().default(false).description("把助手的思考过程写入会话记录。"),
-	language: Schema.union([
-		"auto",
-		"zh",
-		"en"
-	]).default("auto").description("文档语言：auto 跟随对话，或固定中文 / 英文。"),
-	extraInstructions: Schema.string().default("").description("追加到总结提示词的额外要求。")
-});
+import Schema from "@deepseek-ai/schemastery";
 // src/errors.ts
 /** A failure with a stable machine code, safe to surface in a command result. */
 var HandoffError = class extends Error {
@@ -931,6 +907,7 @@ async function streamText(stream) {
 */
 async function generateHandoff(input) {
 	const { ctx, session, config } = input;
+	const focus = (input.focus ?? "").trim();
 	const messages = session.deriveMessages();
 	if (messages.length === 0) throw new HandoffError("EMPTY_SESSION", "当前会话还没有任何消息。");
 	const route = resolveRoute(messages, config);
@@ -955,7 +932,7 @@ async function generateHandoff(input) {
 		createdAt,
 		model: `${route.provider}/${route.model}`,
 		messageCount: messages.length,
-		focus: input.focus,
+		focus,
 		extraInstructions: config.extraInstructions,
 		transcript: transcript.text,
 		truncated: transcript.stats.truncated,
@@ -1012,10 +989,10 @@ async function generateHandoff(input) {
 		provider: route.provider,
 		model: route.model,
 		messages: messages.length,
-		...input.focus === "" ? {} : { focus: input.focus },
+		...focus === "" ? {} : { focus },
 		generator: GENERATOR
 	}, body);
-	const fileName = documentFileName(config.filenamePrefix, now, slugify(input.focus === "" ? title : input.focus));
+	const fileName = documentFileName(config.filenamePrefix, now, slugify(focus === "" ? title : focus));
 	const path = await writeDocument(dir, fileName, markdown);
 	if (config.writeLatest) await writeDocument(dir, "latest.md", renderLatestPointer({
 		name: fileName,
@@ -1032,6 +1009,149 @@ async function generateHandoff(input) {
 		...usage === void 0 ? {} : { usage }
 	};
 }
+// src/auto.ts
+/** Decide whether this boundary should produce a document. */
+function autoDecision(input) {
+	if (!input.enabled) return {
+		generate: false,
+		reason: "disabled"
+	};
+	if (input.inflight) return {
+		generate: false,
+		reason: "inflight"
+	};
+	const minGap = Math.max(0, input.minMinutes) * 6e4;
+	if (input.lastWriteAt > 0 && input.now - input.lastWriteAt < minGap) return {
+		generate: false,
+		reason: "too-soon"
+	};
+	if (input.eventType === "compaction/start") return {
+		generate: true,
+		reason: "compaction"
+	};
+	if (input.eventType === "turn/end") {
+		const every = Math.max(1, Math.floor(input.everyTurns));
+		if (input.turns - input.lastTurnAt >= every) return {
+			generate: true,
+			reason: "turn-interval"
+		};
+		return {
+			generate: false,
+			reason: "below-turn-interval"
+		};
+	}
+	return {
+		generate: false,
+		reason: "irrelevant-event"
+	};
+}
+/** Directory that holds the automatic log beside the documents. */
+function autoLogPath(cwd, config) {
+	return join(resolveOutputDir(cwd, config.outputDir), "auto.log");
+}
+/** Append one diagnostic line; logging must never break the hook. */
+function appendAutoLog(cwd, config, line) {
+	try {
+		appendFileSync(autoLogPath(cwd, config), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}\n`, "utf8");
+	} catch {}
+}
+/** Read the current turn number out of a `turn/end` payload. */
+function turnNumberOf(event) {
+	if (event?.type !== "turn/end") return void 0;
+	const data = event.data;
+	const turn = Number(data?.turn);
+	return Number.isFinite(turn) ? turn : void 0;
+}
+/**
+* Wire the automatic hook. Called from `apply()`; does nothing when
+* `autoGenerate` is off, so a profile can keep the plugin manual-only.
+*/
+function attachAutoHandoff(ctx, config) {
+	if (!config.autoGenerate) return;
+	const states = /* @__PURE__ */ new Map();
+	const stateOf = (id) => {
+		let state = states.get(id);
+		if (state === void 0) {
+			state = {
+				turns: 0,
+				lastTurnAt: 0,
+				lastWriteAt: 0,
+				inflight: false,
+				failures: 0
+			};
+			states.set(id, state);
+		}
+		return state;
+	};
+	ctx.effect(() => ctx.on("session/event", (session, event) => {
+		const header = session.header;
+		if (header.origin === "subagent") return;
+		const id = String(session.id);
+		const state = stateOf(id);
+		const turn = turnNumberOf(event);
+		if (turn !== void 0) state.turns = Math.max(state.turns, turn);
+		const now = Date.now();
+		const decision = autoDecision({
+			enabled: config.autoGenerate,
+			inflight: state.inflight,
+			eventType: event.type,
+			turns: state.turns,
+			lastTurnAt: state.lastTurnAt,
+			lastWriteAt: state.lastWriteAt,
+			now,
+			everyTurns: config.autoEveryTurns,
+			minMinutes: config.autoMinMinutes
+		});
+		if (!decision.generate) return;
+		const cwd = header.cwd ?? process.cwd();
+		state.inflight = true;
+		(async () => {
+			try {
+				const result = await generateHandoff({
+					ctx,
+					session,
+					config
+				});
+				state.lastWriteAt = Date.now();
+				state.lastTurnAt = state.turns;
+				appendAutoLog(cwd, config, `generated ${result.relativePath} v${result.version} (${result.stats.messages} msgs, ${result.stats.chars} chars) via ${event.type}/${decision.reason}`);
+			} catch (error) {
+				state.failures += 1;
+				appendAutoLog(cwd, config, `failed via ${event.type}/${decision.reason}: ${describeError(error)}`);
+			} finally {
+				state.inflight = false;
+			}
+		})();
+	}), "dsh-handoff: automatic handoff hook");
+}
+// src/config.ts
+/**
+* Plain configuration. These are ordinary profile-entry values: a change is
+* saved to the profile patch and takes effect on the next mount, which is the
+* right granularity for a batch job like this one. (`volatile()` is for config
+* references and would turn every value into a reference object.)
+*/
+const Config = Schema.object({
+	outputDir: Schema.string().default(".dsh/handoff").description("生成目录，相对于会话工作目录。"),
+	filenamePrefix: Schema.string().default("handoff").description("文件名前缀，例如 handoff-20261025-2140-xxx.md。"),
+	writeLatest: Schema.boolean().default(true).description("同时写一份 latest.md，方便下一个会话直接读取。"),
+	provider: Schema.string().default("").description("模型 provider；与 model 同时填写才生效，否则沿用会话当前模型。"),
+	model: Schema.string().default("").description("模型 id；与 provider 同时填写才生效。"),
+	maxInputChars: Schema.number().default(48e3).min(4e3).description("会话记录的字符预算，超出时省略中间部分。"),
+	maxOutputTokens: Schema.number().default(4096).min(512).description("生成交接文档的输出 token 上限。"),
+	includeToolResults: Schema.boolean().default(true).description("把工具结果写入会话记录（整段截断）。"),
+	includeInjectedContext: Schema.boolean().default(false).description("把宿主注入的上下文（技能目录、工作区说明等）也写进记录；默认排除，避免挤占预算。"),
+	includeReasoning: Schema.boolean().default(false).description("把助手的思考过程写入会话记录。"),
+	language: Schema.union([
+		"auto",
+		"zh",
+		"en"
+	]).default("auto").description("文档语言：auto 跟随对话，或固定中文 / 英文。"),
+	extraInstructions: Schema.string().default("").description("追加到总结提示词的额外要求。"),
+	autoGenerate: Schema.boolean().default(true).description("自动生成交接文档：上下文压缩前、以及每 N 个回合各写一份；关掉就只剩手动 /handoff。"),
+	autoEveryTurns: Schema.number().default(5).min(1).description("每完成多少个回合写一份自动交接文档。"),
+	autoMinMinutes: Schema.number().default(30).min(0).description("同一会话两份自动文档之间的最小间隔（分钟）。")
+});
 // src/resume.ts
 /** Injected context is bounded: a handoff is a brief, not a transcript. */
 const MAX_INJECTED_CHARS = 3e4;
@@ -1432,6 +1552,7 @@ async function resumeIntoSession(invocation, requested, config) {
 function apply(ctx, config) {
 	ctx.effect(() => ctx.tools.register(createTool(ctx, config)), "dsh-handoff: handoff tool");
 	mountRoutes(ctx, config);
+	attachAutoHandoff(ctx, config);
 	ctx.inject(["commands"], (commandCtx) => {
 		commandCtx.effect(() => commandCtx.commands.register({
 			name: "handoff",

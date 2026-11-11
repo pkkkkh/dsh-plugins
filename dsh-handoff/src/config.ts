@@ -29,6 +29,12 @@ export interface HandoffConfig {
   language: HandoffLanguage
   /** Extra free-form instructions appended to the summarizer prompt. */
   extraInstructions: string
+  /** Generate documents automatically at natural boundaries. */
+  autoGenerate: boolean
+  /** Write one document per this many completed turns. */
+  autoEveryTurns: number
+  /** Minimum minutes between two automatic documents of one session. */
+  autoMinMinutes: number
 }
 
 /**
@@ -57,4 +63,15 @@ export const Config = Schema.object({
     .default('auto')
     .description('文档语言：auto 跟随对话，或固定中文 / 英文。'),
   extraInstructions: Schema.string().default('').description('追加到总结提示词的额外要求。'),
+  autoGenerate: Schema.boolean()
+    .default(true)
+    .description('自动生成交接文档：上下文压缩前、以及每 N 个回合各写一份；关掉就只剩手动 /handoff。'),
+  autoEveryTurns: Schema.number()
+    .default(5)
+    .min(1)
+    .description('每完成多少个回合写一份自动交接文档。'),
+  autoMinMinutes: Schema.number()
+    .default(30)
+    .min(0)
+    .description('同一会话两份自动文档之间的最小间隔（分钟）。'),
 })

@@ -28,6 +28,12 @@ interface HandoffConfig {
   language: HandoffLanguage;
   /** Extra free-form instructions appended to the summarizer prompt. */
   extraInstructions: string;
+  /** Generate documents automatically at natural boundaries. */
+  autoGenerate: boolean;
+  /** Write one document per this many completed turns. */
+  autoEveryTurns: number;
+  /** Minimum minutes between two automatic documents of one session. */
+  autoMinMinutes: number;
 }
 /**
  * Plain configuration. These are ordinary profile-entry values: a change is
@@ -48,6 +54,9 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
   includeReasoning: Schema<boolean, boolean, "defined">;
   language: Schema<"auto" | "zh" | "en", "auto" | "zh" | "en", "defined">;
   extraInstructions: Schema<string, string, "defined">;
+  autoGenerate: Schema<boolean, boolean, "defined">;
+  autoEveryTurns: Schema<number, number, "defined">;
+  autoMinMinutes: Schema<number, number, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
   outputDir: Schema<string, string, "defined">;
   filenamePrefix: Schema<string, string, "defined">;
@@ -61,6 +70,9 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
   includeReasoning: Schema<boolean, boolean, "defined">;
   language: Schema<"auto" | "zh" | "en", "auto" | "zh" | "en", "defined">;
   extraInstructions: Schema<string, string, "defined">;
+  autoGenerate: Schema<boolean, boolean, "defined">;
+  autoEveryTurns: Schema<number, number, "defined">;
+  autoMinMinutes: Schema<number, number, "defined">;
 }>>, "plain">;
 export declare const name = "dsh-handoff";
 /**

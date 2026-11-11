@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { attachAutoHandoff } from './auto.ts'
 import { Config } from './config.ts'
 import type { HandoffConfig } from './config.ts'
 import { describeError, HandoffError } from './errors.ts'
@@ -138,6 +139,7 @@ async function resumeIntoSession(
 export function apply(ctx: Context, config: HandoffConfig): void {
   ctx.effect(() => ctx.tools.register(createTool(ctx, config)), 'dsh-handoff: handoff tool')
   mountRoutes(ctx, config)
+  attachAutoHandoff(ctx, config)
 
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(

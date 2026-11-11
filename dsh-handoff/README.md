@@ -150,6 +150,18 @@ updated: "2026-10-26T08:58:33+08:00"
 | `includeReasoning` | `false` | 把模型思考过程写进记录 |
 | `language` | `auto` | `auto` 跟随对话语言，或固定 `zh` / `en` |
 | `extraInstructions` | 空 | 追加给撰写器的额外要求 |
+| `autoGenerate` | `true` | 自动在边界上生成交接文档（见下节）；关掉就只剩手动 `handoff` / `/handoff` |
+| `autoEveryTurns` | `5` | 每完成多少个回合补一份自动文档 |
+| `autoMinMinutes` | `30` | 同一会话两份自动文档之间的最小间隔（分钟） |
+
+## 自动生成
+
+手动工具的问题是没人点时它就不跑：长会话一路跑下去，下一个会话读到的还是几小时前的旧文档。插件因此挂了两个自然边界：
+
+- **`compaction/start`**——上下文要压缩了，说明已经满了：压缩前先写一份，摘要才有现成依据。
+- **`turn/end`**——每完成 `autoEveryTurns` 个回合补一份心跳；`autoMinMinutes` 兜住频率，别把长会话刷成流水账。
+
+行为约定：每会话**一次只跑一份**（in-flight 去重）；子代理会话（`header.origin === 'subagent'`）跳过，父会话负责交接；生成失败只往 `<outputDir>/auto.log` 写一行，**绝不影响会话本身**；成功后照常维护 `latest.md`。
 
 ## 设计要点
 
