@@ -34,3 +34,9 @@
 - `dsh-pet-vk`（`apps/vk1-plugin`，上游待确认）
 
 有更新就跑 `diff -r` 出报告，不自动合并。
+
+## 铺到 `$DSH_HOME/bili-duty/` 的时机
+
+插件每次启动会 `ensureHomeFiles()`：把 `vendor/bilibili-mcp/mcp_server.py` 与 `lib/asr.py` 铺到 `$DSH_HOME/bili-duty/`，**内容不同就覆盖**（同内容跳过）。所以改完本目录的 `vendor/…/mcp_server.py`，**重启 DSH 就会自动同步**，不用手动拷；运行中的 Python MCP 读的是家里那份。
+
+（`tools/swap-node-modules-link.cmd` 是把 profile `node_modules` 里那份换成指向本目录 junction 的一次性脚本，留档用。）
