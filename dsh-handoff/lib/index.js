@@ -953,10 +953,15 @@ async function generateHandoff(input) {
 		maxTokens: config.maxOutputTokens,
 		...input.signal === void 0 ? {} : { signal: input.signal }
 	};
-	const first = await streamText(ctx.llm.stream(options));
-	let body = normalizeBody(first.text);
-	let usage = first.usage;
-	if (body === "") throw new HandoffError("EMPTY_DOCUMENT", "模型返回了空文档。");
+	let body = "";
+	let usage;
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		const streamed = await streamText(ctx.llm.stream(options));
+		body = normalizeBody(streamed.text);
+		usage = streamed.usage;
+		if (body !== "") break;
+	}
+	if (body === "") throw new HandoffError("EMPTY_DOCUMENT", "模型返回了空文档（已重试 1 次）。");
 	const missing = missingSections(body, language);
 	if (missing.length > 0) {
 		const retryUser = buildRepairPrompt(prompt.user, missing, language);

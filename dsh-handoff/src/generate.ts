@@ -206,10 +206,17 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
 
-  const first = await streamText(ctx.llm.stream(options))
-  let body = normalizeBody(first.text)
-  let usage = first.usage
-  if (body === '') throw new HandoffError('EMPTY_DOCUMENT', '模型返回了空文档。')
+  // A blank answer is a transient upstream hiccup often enough that one
+  // immediate retry costs less than leaving the caller to try again later.
+  let body = ''
+  let usage: TokenUsage | undefined
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const streamed = await streamText(ctx.llm.stream(options))
+    body = normalizeBody(streamed.text)
+    usage = streamed.usage
+    if (body !== '') break
+  }
+  if (body === '') throw new HandoffError('EMPTY_DOCUMENT', '模型返回了空文档（已重试 1 次）。')
 
   // One repair attempt when the model dropped required sections. The summary is
   // the part the next session reads first, so a structurally incomplete handoff

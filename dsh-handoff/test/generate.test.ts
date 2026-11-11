@@ -208,6 +208,36 @@ describe('generateHandoff', () => {
     expect(captured).toHaveLength(1)
   })
 
+  it('retries once when the first answer is empty', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'handoff-test-'))
+    created.push(cwd)
+    const captured: GenerateOptions[] = []
+    const result = await generateHandoff({
+      ctx: queuedContext(['', COMPLETE_DOCUMENT], captured),
+      session: fakeSession([userMessage('继续做'), assistantMessage('好')], cwd),
+      config,
+      focus: '',
+    })
+
+    expect(captured).toHaveLength(2)
+    expect(result.markdown).toContain('## 接手摘要')
+  })
+
+  it('gives up after a second empty answer', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'handoff-test-'))
+    created.push(cwd)
+    const captured: GenerateOptions[] = []
+    await expect(
+      generateHandoff({
+        ctx: queuedContext(['', ''], captured),
+        session: fakeSession([userMessage('继续做'), assistantMessage('好')], cwd),
+        config,
+        focus: '',
+      }),
+    ).rejects.toMatchObject({ code: 'EMPTY_DOCUMENT' })
+    expect(captured).toHaveLength(2)
+  })
+
   it('honours a configured output directory and prefix', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'handoff-test-'))
     created.push(cwd)
