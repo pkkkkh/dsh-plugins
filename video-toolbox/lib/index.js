@@ -3,53 +3,73 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'video-toolbox'
 
 /**
- * 只要 tools 服务：本插件不干实事，只把一次调用转给下面三家之一。
- * 缺任何一家都不会让本插件挂掉——转调时那一家报 UNKNOWN_TOOL 会变成可读错误。
+ * 只要 tools 服务：本插件不干事，只把一次调用转给三家里对应那个工具。
  */
 export const inject = ['tools']
 
 const TOOL_DESCRIPTION = [
-  '视频工具箱（聚合入口）：用 action 选一件事做，内部转调 dsh-ffmpeg / dsh-media-converter / dsh-audio-tools。',
-  '动作：health(环境体检) / probe(探测) / cut(裁切) / concat(拼接) / encode(转码压制) / subtitle(字幕烧录或封装)',
-  ' / audio-extract(抽音轨) / frames(抽帧) / gif / adjust(缩放旋转变速) / storyboard(宫格总览)',
-  ' / convert(万能转格式，走 media-converter) / audio-convert(音频转码) / transcribe(语音转写，本地 whisper)。',
-  '参数按动作传：cut 用 start/end 或 duration；concat 用 inputs 数组；encode 用 vcodec/crf/preset；',
-  'transcribe 用 language/model/backend/srt。只传该动作需要的字段，没用到的留空即可。',
+  '视频工具箱（聚合入口）：用 action 选一件事，内部转调 dsh-ffmpeg / dsh-media-converter / dsh-audio-tools。',
+  '动作：health / probe / audio-probe / cut / concat / encode / gpu-encode / subtitle / audio-extract',
+  ' / frames / gif / adjust / storyboard / convert / tags / audio-convert / transcribe。',
+  '参数按动作传（没用到的留空）：cut 用 start/end 或 duration；concat 用 inputs 数组；encode 用 preset/crf/scale；',
+  'gpu-encode 用 codec(h264|hevc)+quality；frames 用 every 或 times[]；adjust 用 speed/volume/rotate；',
+  'transcribe 用 language/model/backend/srt。时间参数写 "90" 或 "00:01:30"。',
 ].join('')
 
-/** action → 目标工具 + 该动作允许透传的参数名。 */
+/** action → 目标工具、允许透传的参数名、固定参数、input 映射到的键名。 */
 const ROUTES = {
   'health': { tool: 'ffmpeg_health', keys: [] },
   'probe': { tool: 'ffmpeg_probe', keys: ['input'] },
+  'audio-probe': { tool: 'audio_probe', keys: [], pathKey: 'path' },
   'cut': { tool: 'ffmpeg_cut', keys: ['input', 'output', 'start', 'end', 'duration', 'reencode'] },
   'concat': { tool: 'ffmpeg_concat', keys: ['inputs', 'output', 'reencode', 'width', 'height', 'fps'] },
-  'encode': { tool: 'ffmpeg_encode', keys: ['input', 'output', 'vcodec', 'crf', 'preset'] },
-  'subtitle': { tool: 'ffmpeg_subtitle', keys: ['input', 'output', 'subtitle', 'mode'] },
-  'audio-extract': { tool: 'ffmpeg_extract', keys: ['input', 'output', 'format'], fixed: { stream: 'a' } },
-  'frames': { tool: 'ffmpeg_frames', keys: ['input', 'output', 'every', 'times'] },
-  'gif': { tool: 'ffmpeg_gif', keys: ['input', 'output', 'start', 'end', 'duration', 'fps', 'width'] },
-  'adjust': { tool: 'ffmpeg_adjust', keys: ['input', 'output', 'scale', 'rotate', 'speed'] },
-  'storyboard': { tool: 'ffmpeg_storyboard', keys: ['input', 'grid'] },
-  'convert': { tool: 'media_toolbox', keys: ['format', 'codec', 'quality', 'bitrate', 'fps', 'width'], fixed: { action: 'convert' }, pathKey: 'path' },
-  'audio-convert': { tool: 'audio_convert', keys: ['input', 'output', 'format', 'bitrate', 'channels', 'sampleRate'] },
-  'transcribe': { tool: 'audio_transcribe', keys: ['input', 'output', 'language', 'model', 'backend', 'srt'] },
+  'encode': { tool: 'ffmpeg_encode', keys: ['input', 'output', 'preset', 'crf', 'fps', 'scale'] },
+  'gpu-encode': { tool: 'media_toolbox', keys: ['format', 'codec', 'quality', 'bitrate', 'fps', 'width'], fixed: { action: 'convert' }, pathKey: 'path' },
+  'subtitle': { tool: 'ffmpeg_subtitle', keys: ['input', 'subtitle', 'output'] },
+  'audio-extract': { tool: 'ffmpeg_extract', keys: ['input', 'output'], fixed: { what: 'audio' } },
+  'frames': { tool: 'ffmpeg_frames', keys: ['input', 'every', 'times', 'maxFrames', 'outputDir', 'format'] },
+  'gif': { tool: 'ffmpeg_gif', keys: ['input', 'start', 'duration', 'fps', 'width', 'output'] },
+  'adjust': { tool: 'ffmpeg_adjust', keys: ['input', 'speed', 'volume', 'mute', 'rotate', 'output'] },
+  'storyboard': { tool: 'ffmpeg_storyboard', keys: ['input', 'output', 'count', 'columns', 'width', 'start', 'end'] },
+  'convert': { tool: 'media_toolbox', keys: ['format', 'codec', 'quality', 'bitrate', 'fps', 'width', 'channels', 'sampleRate'], fixed: { action: 'convert' }, pathKey: 'path' },
+  'tags': { tool: 'media_toolbox', keys: ['tags'], fixed: { action: 'rewrite-tags' }, pathKey: 'path' },
+  'audio-convert': { tool: 'audio_convert', keys: ['input', 'output', 'format', 'bitrate', 'sampleRate', 'channels', 'start', 'duration', 'normalize', 'overwrite'] },
+  'transcribe': { tool: 'audio_transcribe', keys: ['input', 'output', 'language', 'model', 'backend', 'prompt', 'srt'] },
 }
 
-/** 表里没有的字段不转，空值不转。 */
+const TIME_KEYS = new Set(['start', 'end', 'duration'])
+
+/** 时间参数统一转成字符串（ffmpeg_cut 那类要字符串，storyboard 两者都吃）。 */
+function normalizeValue(key, value) {
+  if (value === undefined || value === null || value === '') return undefined
+  if (TIME_KEYS.has(key)) return String(value)
+  if (Array.isArray(value) && value.length === 0) return undefined
+  return value
+}
+
 function buildArgs(action, args) {
   const route = ROUTES[action]
   const out = { ...(route.fixed ?? {}) }
   for (const key of route.keys) {
-    const value = args?.[key]
-    if (value === undefined || value === null || value === '') continue
-    if (Array.isArray(value) && value.length === 0) continue
+    const value = normalizeValue(key, args?.[key])
+    if (value === undefined) continue
     out[key] = value
   }
   if (route.pathKey !== undefined) {
     const input = args?.input
-    if (input === undefined || input === '') throw new Error(`${action} 需要 input（源文件路径）。`)
+    if (typeof input !== 'string' || input.trim() === '') throw new Error(`${action} 需要 input（源文件路径）。`)
     out[route.pathKey] = input
-    delete out.input
+  }
+  // media_toolbox 的 trim 是 {start,end} 对象；外面用 trimStart/trimEnd 两个数字。
+  if (action === 'convert' || action === 'gpu-encode') {
+    const trimStart = args?.trimStart
+    const trimEnd = args?.trimEnd
+    if (trimStart !== undefined || trimEnd !== undefined) {
+      const trim = {}
+      if (trimStart !== undefined) trim.start = Number(trimStart)
+      if (trimEnd !== undefined) trim.end = Number(trimEnd)
+      out.trim = trim
+    }
   }
   return out
 }
@@ -62,42 +82,47 @@ export function apply(ctx) {
           name: 'video_toolbox',
           description: TOOL_DESCRIPTION,
           parameters: {
-            action: {
-              type: 'string',
-              description: '要做什么：' + Object.keys(ROUTES).join(' / '),
-              required: true,
-            },
-            input: { type: 'string', description: '源文件路径（convert 动作里叫 path，这里统一填 input）' },
+            action: { type: 'string', description: '要做什么：' + Object.keys(ROUTES).join(' / '), required: true },
+            input: { type: 'string', description: '源文件路径（audio-probe/convert/tags 内部会映射成 path）' },
             output: { type: 'string', description: '输出路径（部分动作可省）' },
-            inputs: { type: 'array', items: { type: 'string' }, description: 'concat 用：按顺序的片段路径数组' },
-            start: { type: 'number', description: '起点（秒）' },
-            end: { type: 'number', description: '终点（秒）' },
-            duration: { type: 'number', description: '时长（秒）' },
-            format: { type: 'string', description: '目标格式：mp4 / mkv / mp3 / wav / srt …' },
-            vcodec: { type: 'string', description: '视频编码器：libx264 / hevc / h264_nvenc / hevc_nvenc' },
-            crf: { type: 'number', description: '画质（越小越好，x264 常用 18–23）' },
-            preset: { type: 'string', description: '编码预设：fast / slow / p5（NVENC）' },
-            subtitle: { type: 'string', description: '字幕文件路径（srt/ass）' },
-            mode: { type: 'string', description: '字幕模式：burn(烧进画面) / embed(软字幕封装)' },
-            every: { type: 'number', description: '抽帧间隔（秒）' },
-            times: { type: 'array', items: { type: 'number' }, description: '抽帧时刻列表（秒）' },
+            inputs: { type: 'array', items: { type: 'string' }, description: 'concat 用：按顺序的片段数组' },
+            start: { type: 'string', description: '起点："90" 或 "00:01:30"' },
+            end: { type: 'string', description: '终点：秒数或 HH:MM:SS' },
+            duration: { type: 'string', description: '时长：秒数或 HH:MM:SS' },
+            trimStart: { type: 'number', description: 'convert/gpu-encode 的裁剪起点（秒）' },
+            trimEnd: { type: 'number', description: 'convert/gpu-encode 的裁剪终点（秒）' },
+            format: { type: 'string', description: '目标格式：mp4 / mkv / mp3 / wav / png …' },
+            preset: { type: 'string', description: 'encode 预设：bilibili-1080p / bilibili-4k / vertical-1080p / web-720p' },
+            crf: { type: 'number', description: 'encode 画质 0-51（越小越清晰）' },
+            scale: { type: 'string', description: 'encode 分辨率，如 1920:1080 或 -2:720' },
+            codec: { type: 'string', description: 'gpu-encode 编码器：h264 / hevc（GPU 硬编，无显卡自动回退）' },
+            quality: { type: 'number', description: 'convert/gpu-encode 质量 1-100（90=默认）' },
+            bitrate: { type: 'number', description: '音频码率 kbps（32-320），仅音频编码目标有效' },
             fps: { type: 'number', description: '帧率' },
             width: { type: 'number', description: '宽度（像素）' },
             height: { type: 'number', description: '高度（像素）' },
-            scale: { type: 'string', description: '缩放表达式，例如 1280:-2' },
-            rotate: { type: 'number', description: '旋转角度' },
-            speed: { type: 'number', description: '倍速，例如 1.5 / 0.5' },
-            grid: { type: 'string', description: '宫格规格，例如 3x3' },
-            reencode: { type: 'boolean', description: 'cut/concat 时是否重编码（false 走流拷贝，快但需同参数）' },
-            codec: { type: 'string', description: 'media-converter 的编码器参数' },
-            quality: { type: 'string', description: 'media-converter 的质量档位' },
-            bitrate: { type: 'string', description: '音频/视频码率，例如 128k / 4M' },
-            channels: { type: 'number', description: '声道数：1 / 2' },
-            sampleRate: { type: 'number', description: '采样率，例如 44100 / 48000' },
-            language: { type: 'string', description: '转写语言：auto / zh / en' },
-            model: { type: 'string', description: 'whisper 模型：tiny / base / small / medium / large-v3' },
-            backend: { type: 'string', description: '转写后端：cli（本地） / api' },
-            srt: { type: 'boolean', description: '转写时是否顺带导出 srt' },
+            channels: { type: 'number', description: '声道数 1/2' },
+            sampleRate: { type: 'number', description: '采样率 Hz' },
+            subtitle: { type: 'string', description: '字幕文件路径（srt/ass）' },
+            every: { type: 'number', description: 'frames 抽帧间隔（秒）' },
+            times: { type: 'array', items: { type: 'string' }, description: 'frames 抽帧时刻，如 ["00:00:05"]' },
+            maxFrames: { type: 'number', description: 'frames 帧数上限 1-500' },
+            outputDir: { type: 'string', description: 'frames 输出目录（每次运行新建 run-*）' },
+            speed: { type: 'number', description: 'adjust 倍速，1.5 / 0.5' },
+            volume: { type: 'string', description: 'adjust 音量：倍数 1.5 或 -3dB' },
+            mute: { type: 'boolean', description: 'adjust 静音' },
+            rotate: { type: 'number', description: 'adjust 顺时针旋转 90/180/270' },
+            count: { type: 'number', description: 'storyboard 采样格数 2-36' },
+            columns: { type: 'number', description: 'storyboard 列数 1-6' },
+            reencode: { type: 'boolean', description: 'cut/concat 是否重编码（默认流拷贝）' },
+            normalize: { type: 'boolean', description: 'audio-convert 响度归一化' },
+            overwrite: { type: 'boolean', description: 'audio-convert 覆盖已存在输出' },
+            tags: { type: 'object', description: 'tags 要写的标签：{title,artist,album,comment,date,genre}' },
+            language: { type: 'string', description: 'transcribe 语言：auto / zh / en' },
+            model: { type: 'string', description: 'transcribe whisper 模型：tiny/base/small/medium/large-v3' },
+            backend: { type: 'string', description: 'transcribe 后端：cli（本地）/ api' },
+            prompt: { type: 'string', description: 'transcribe 初始提示（人名/术语）' },
+            srt: { type: 'boolean', description: 'transcribe 顺带导出 srt' },
           },
           output: {
             schema: {
@@ -137,11 +162,7 @@ export function apply(ctx) {
               .map((block) => block.text)
               .join('\n')
               .trim()
-            return {
-              action,
-              tool: route.tool,
-              text: text.length > 0 ? text : JSON.stringify(result.value ?? {}),
-            }
+            return { action, tool: route.tool, text: text.length > 0 ? text : JSON.stringify(result.value ?? {}) }
           },
         }),
       ),
