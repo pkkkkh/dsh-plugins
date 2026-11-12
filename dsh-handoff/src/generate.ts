@@ -38,6 +38,8 @@ export interface GenerateResult {
   /** 1-based position of this document in the handoff chain. */
   readonly version: number
   readonly stats: TranscriptStats
+  /** True when the writer ran out of output budget even after continuing. */
+  readonly cutOff: boolean
   readonly usage?: TokenUsage
 }
 
@@ -46,6 +48,23 @@ const GENERATOR = `dsh-handoff@${PLUGIN_VERSION}`
 
 /** Cap on the previous document fed back to the writer: continuity, not a transcript. */
 const MAX_PREVIOUS_CHARS = 8_000
+
+/** How many continuation calls a truncated document gets before it is marked incomplete. */
+const MAX_CONTINUATIONS = 2
+
+/** Ask the writer to resume at the cut point instead of starting over. */
+function continuationPrompt(language: string): string {
+  return language === 'en'
+    ? 'Your handoff document was cut off by the output limit. Continue from the exact cut point: output only the remaining markdown, do not repeat what is already written, and do not explain.'
+    : '你写的交接文档因为输出上限被截断了。请从断点处继续写：只输出剩下的 markdown，不要重复已经写过的内容，也不要解释。'
+}
+
+/** Visible marker so a cut-off document is never mistaken for a finished one. */
+function truncationNotice(maxTokens: number, language: string): string {
+  return language === 'en'
+    ? `> ⚠️ Incomplete document: the writer hit the output limit (maxOutputTokens=${maxTokens}).`
+    : `> ⚠️ 本文档未写完：模型输出达到上限（maxOutputTokens=${maxTokens}），末尾被截断。`
+}
 
 /**
  * Read the document this one supersedes.
@@ -210,19 +229,45 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
   // immediate retry costs less than leaving the caller to try again later.
   let body = ''
   let usage: TokenUsage | undefined
+  let finish: FinishReason | undefined
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const streamed = await streamText(ctx.llm.stream(options))
     body = normalizeBody(streamed.text)
     usage = streamed.usage
+    finish = streamed.finish
     if (body !== '') break
   }
   if (body === '') throw new HandoffError('EMPTY_DOCUMENT', '模型返回了空文档（已重试 1 次）。')
 
+  // A document cut off by the output limit is worse than a short one: the next
+  // session reads the tail as if it were finished. Keep each call within budget
+  // and ask the writer to continue from the cut point instead of accepting it.
+  for (let round = 0; finish?.kind === 'max-tokens' && round < MAX_CONTINUATIONS; round += 1) {
+    const continued = await streamText(
+      ctx.llm.stream({
+        ...options,
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: `${continuationPrompt(language)}\n\n${body}` }],
+          },
+        ],
+      }),
+    )
+    const extra = normalizeBody(continued.text)
+    finish = continued.finish
+    if (extra === '') break
+    body = `${body}\n${extra}`
+    usage = continued.usage ?? usage
+  }
+  const cutOff = finish?.kind === 'max-tokens'
+
   // One repair attempt when the model dropped required sections. The summary is
   // the part the next session reads first, so a structurally incomplete handoff
   // is worth a second call; a still-imperfect second answer is accepted rather
-  // than failing the user.
-  const missing = missingSections(body, language)
+  // than failing the user. A truncated answer is exempt: re-asking restarts the
+  // document from the top and would throw away what was already written.
+  const missing = cutOff ? [] : missingSections(body, language)
   if (missing.length > 0) {
     const retryUser = buildRepairPrompt(prompt.user, missing, language)
     const second = await streamText(
@@ -239,6 +284,7 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
   }
 
   const activity = sessionActivity(session, now)
+  const finalBody = cutOff ? `${body}\n\n${truncationNotice(config.maxOutputTokens, language)}` : body
   const markdown = renderDocument(
     {
       title,
@@ -255,7 +301,7 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
       ...(focus === '' ? {} : { focus }),
       generator: GENERATOR,
     },
-    body,
+    finalBody,
   )
 
   const fileName = documentFileName(config.filenamePrefix, now, slugify(focus === '' ? title : focus))
@@ -272,6 +318,7 @@ export async function generateHandoff(input: GenerateInput): Promise<GenerateRes
     route,
     version: chain.version,
     stats: transcript.stats,
+    cutOff,
     ...(usage === undefined ? {} : { usage }),
   }
 }
