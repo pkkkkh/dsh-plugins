@@ -158,23 +158,34 @@ export function apply(ctx) {
             }
             const callArgs = buildArgs(action, args)
             const callId = `video-toolbox-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-            const result = await ctx.tools.execute({
-              callId,
-              name: route.tool,
-              arguments: callArgs,
-              agent: exec?.agent,
-              signal: exec?.signal,
+            const signal = exec?.signal ?? new AbortController().signal
+            // DSH 0.2.2：tools.execute 收「批量调用」，结果是批量的 ToolCallResult[]
+            const batch = await ctx.tools.execute({
+              calls: [{ type: 'tool-call', id: callId, name: route.tool, arguments: JSON.stringify(callArgs) }],
+              signal,
+              ...(exec?.agent === undefined ? {} : { agent: exec.agent }),
             })
-            if (result.isError === true) {
-              const reason = result.error?.message ?? '未知错误'
+            const first = Array.isArray(batch?.results) ? batch.results[0] : undefined
+            if (first === undefined) {
+              throw new Error(`${route.tool} 没有返回结果`)
+            }
+            const failed = first.isError === true || first.result?.isError === true
+            if (failed) {
+              const reason = first.error?.message ?? first.result?.error?.message ?? '未知错误'
               throw new Error(`${route.tool} 执行失败：${reason}`)
             }
-            const text = (result.content ?? [])
+            const blocks = Array.isArray(first.content)
+              ? first.content
+              : Array.isArray(first.result?.content)
+                ? first.result.content
+                : []
+            const text = blocks
               .filter((block) => block?.type === 'text')
               .map((block) => block.text)
               .join('\n')
               .trim()
-            return { action, tool: route.tool, text: text.length > 0 ? text : JSON.stringify(result.value ?? {}) }
+            const fallback = JSON.stringify(first.value ?? first.result?.value ?? first).slice(0, 2000)
+            return { action, tool: route.tool, text: text.length > 0 ? text : fallback }
           },
         }),
       ),
