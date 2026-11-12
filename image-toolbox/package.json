@@ -1,0 +1,22 @@
+{
+  "name": "image-toolbox",
+  "version": "0.1.0",
+  "description": "服务端生图：一个 image_generate 工具，直接调火山方舟（豆包 Seedream）出图并落盘。没有客户端 UI。",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2"
+  }
+}

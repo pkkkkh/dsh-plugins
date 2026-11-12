@@ -1,0 +1,4 @@
+# Bundle patch layer: loading this package as a bundle adds its plugin row.
+- insert:
+    - id: image-toolbox
+      name: image-toolbox
