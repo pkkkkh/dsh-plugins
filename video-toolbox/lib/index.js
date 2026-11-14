@@ -37,6 +37,22 @@ const ROUTES = {
   'transcribe': { tool: 'audio_transcribe', keys: ['input', 'output', 'language', 'model', 'backend', 'prompt', 'srt'] },
 }
 
+/** 把工具返回值（内容块数组 / {content} / 普通对象）压成一段文本。 */
+function blocksToText(value) {
+  if (value === undefined || value === null) return '（无返回内容）'
+  if (typeof value === 'string') return value
+  const blocks = Array.isArray(value) ? value : Array.isArray(value?.content) ? value.content : []
+  const text = blocks
+    .filter((block) => block?.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim()
+  if (text.length > 0) return text
+  const inner = value?.value ?? value?.result?.value
+  if (typeof inner === 'string') return inner
+  return JSON.stringify(inner ?? value).slice(0, 2000)
+}
+
 const TIME_KEYS = new Set(['start', 'end', 'duration'])
 
 /** 时间参数统一转成字符串（ffmpeg_cut 那类要字符串，storyboard 两者都吃）。 */
@@ -159,7 +175,15 @@ export function apply(ctx) {
             const callArgs = buildArgs(action, args)
             const callId = `video-toolbox-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
             const signal = exec?.signal ?? new AbortController().signal
-            // DSH 0.2.2：tools.execute 收「批量调用」，结果是批量的 ToolCallResult[]
+            // ① 首选：直接取工具定义自己调，绕开 PTC 执行器
+            //    （PTC 只允许 run_code 直接调工具，插件的 ctx.tools.execute 会被判成「非嵌套」而拒绝；
+            //     2026-11-14 在 0.2.2-rc.1/rc.3 上均复现）
+            const definition = typeof ctx.tools?.executable === 'function' ? ctx.tools.executable(route.tool) : undefined
+            if (definition?.execute !== undefined) {
+              const value = await definition.execute(callArgs, exec)
+              return { action, tool: route.tool, text: blocksToText(value) }
+            }
+            // ② 兜底：老路径，走执行器的批量接口
             const batch = await ctx.tools.execute({
               calls: [{ type: 'tool-call', id: callId, name: route.tool, arguments: JSON.stringify(callArgs) }],
               signal,
