@@ -1,6 +1,6 @@
 # 本目录 = dsh-bili-subagent 的自用维护版
 
-- **上游**：`dsh-bili-subagent` 0.9.8 · MIT · <https://github.com/Yuuyuko-uu/dsh-bili-subagent>（npm 同名包）
+- **上游**：`dsh-bili-subagent` **1.0.1**（2026-11-14 从 0.9.8 升级）· MIT · <https://github.com/Yuuyuko-uu/dsh-bili-subagent>（npm 同名包）
 - **拷贝来源**：`D:\dsh-home\profiles\desktop\node_modules\dsh-bili-subagent`（2026-11-11 22:40 拷入仓库，之后 profile 用 junction 指这里）
 - **许可证**：MIT，保留原 `LICENSE`；本目录的改动同样以 MIT 发布
 
@@ -11,7 +11,9 @@
 | `index.js` | +19 行：注册 `bili_digest` 工具（参数 bvid / comments≤10 / lines 5–120 / full） |
 | `vendor/bilibili-mcp/mcp_server.py` | +91 行：实现 `bili_digest` MCP tool —— 一次返回「视频数据 + 压缩字幕（带时间戳、均匀抽样）+ 前几条热评」 |
 
-**纯新增，未改动任何上游逻辑**（2026-11-11 与 npm 0.9.8 原版逐文件 diff：删除行 0 / 0）。
+**纯新增，未改动任何上游逻辑**（2026-11-11 与 npm 0.9.8 原版逐文件 diff：删除行 0 / 0；2026-11-14 与 1.0.1 原版同样只有这两处新增）。
+
+> **两处改动已固化为补丁集**：`patches/0001-bili-digest.patch`（基线 = npm 1.0.1），升级上游时自动重放，不用手工搬。
 
 ## 为什么要它
 
@@ -19,11 +21,16 @@
 
 ## 上游升级流程
 
-1. 确认上游新版本：`curl -s https://registry.npmjs.org/dsh-bili-subagent | jq -r '."dist-tags".latest'`，或看 GitHub tag。
-2. 下载新 tarball 解开，和本目录做 `diff -r`：先确认**上游自己**改了什么。
-3. 把我们那两段（`index.js` 的 tool 注册、`mcp_server.py` 的 `bili_digest`）重新插回去。
-4. 跑 `node --test tests/*.test.mjs`（上游自带）与 `node selfcheck.mjs`。
-5. 重启 DSH 生效（junction 安装，改完不用复制）。
+**一条命令**（2026-11-14 起）：
+
+```bash
+bash C:/Users/kh006/.dsh/im/scripts/sync-subagent-upstream.sh 1.0.2
+```
+
+脚本做的事：下载 npm tarball → 备份当前目录（`dsh-bili-subagent.bak-<时间>`）→ 覆盖上游文件（保留 `UPSTREAM.md` / `tools/` / `patches/`）→ 应用 `patches/*.patch` → 跑 `py_compile` 与引用数校验。
+
+升级后：**重启 DSH** → 验 `bili_scan` 派活、`bili_digest`、设置页。
+冲突（`git apply` 失败）时看 `patches/README.md` 的「冲突怎么办」。
 
 ## 每周六自动检查
 

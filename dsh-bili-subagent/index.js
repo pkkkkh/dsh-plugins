@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto'
 import * as zlib from 'node:zlib'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
-import { 记刷过的 } from './lib/seen.mjs'
+import { 记刷过的, 最近看过的 } from './lib/seen.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, inValley, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
@@ -288,6 +288,57 @@ export function 拼提醒文案(items) {
   行们.push('要不要回、要不要看，你定；我只是先把话带到。')
   // 一条都没有时别留一串空行（以前 [] 会拼出三个连续换行）
   return 行们.filter((x, i, a) => !(x === '' && a[i - 1] === '')).join('\n')
+}
+
+/**
+ * ⭐ 0.9.10：这台 DSH 该用哪种子代理接口。
+ *   rc.1 / rc.2：`startActivation(spec)`
+ *   rc.3      ：`startContinuable(spec)`（可续，形状一样）和 `start(provider, request)`（一次性）
+ * 按「有哪个用哪个」的顺序认，都没有就返回 'none'（调用方走兜底新建会话）。
+ */
+export function 选子代理接口(服务) {
+  const 有 = (名) => Boolean(服务) && typeof 服务[名] === 'function'
+  if (有('startContinuable')) return 'continuable'
+  if (有('startActivation')) return 'activation'
+  if (有('start')) return 'start'
+  return 'none'
+}
+
+/**
+ * ⭐ 1.0.1：造子代理的调用参数。
+ *
+ * 这里踩过两次坑，形状**每个版本都不一样**：
+ *   · rc.1 / rc.2：`startActivation({ provider, label, request: { prompt, parent }, signal, delivery })`
+ *   · rc.3      ：`startActivation` 还在，但要的是**扁平 spec** —— 它内部读的是 `spec.parent.id`，
+ *                  `parent` 和 `prompt` 都在顶层，不包 `request`
+ *   · 另外还有 `startContinuable(spec)`（request 包一层）和 `start(name, request)`（一次性）
+ *
+ * 所以这里不猜：把几种形状都造出来，调用方挨个试，哪个不抛用哪个。
+ */
+export function 造子代理参数(模式, 基 = {}) {
+  const provider = String(基.provider || 'spawn')
+  const label = String(基.label || '')
+  const parent = 基.parent
+  const prompt = 基.prompt
+  const signal = 基.signal
+  const 额外 = 基.agentOptions ? { agentOptions: 基.agentOptions } : {}
+  const 请求 = { prompt, parent, signal, ...额外 }
+  if (模式 === 'continuable') {
+    return { provider, label, request: 请求, signal }
+  }
+  if (模式 === 'activation-flat') {
+    // rc.3：parent / prompt 都在顶层
+    return { provider, label, parent, prompt, signal, delivery: 'caller', ...额外 }
+  }
+  if (模式 === 'activation-nested') {
+    // rc.1 / rc.2：包一层 request
+    return { provider, label, request: 请求, signal, delivery: 'caller' }
+  }
+  if (模式 === 'start') {
+    // rc.3 的一次性派活：start(name, request)
+    return { 名: provider, 请求: { label, prompt, parent, signal, ...额外 } }
+  }
+  return null
 }
 
 export function apply(ctx, config) {
@@ -924,12 +975,27 @@ export function apply(ctx, config) {
     //    不塞评论块、不欠评论（连带 bili_send_message 那道「先发评论」的闸也不会挡）。
     //    从哪条路进来，就从哪条路回去；两个都做才是多此一举。
     const 私信回话 = Boolean(定点) && isDmShare(定点)
-    const prompt = (定点
+    let prompt = (定点
       ? String(cfg.watchPrompt || WATCH_TMPL).split('{bvid}').join(定点)
       : String(cfg.scanPrompt || SCAN_PROMPT_TMPL))
       .split('{owner}').join(owner)
       .split('{direction}').join(dir)
       .split('{n}').join(String(perRound)) + levelLine
+    // ⭐ 0.9.9：把判重表里最近刷过的 BV 直接写进提示词。
+    //   光靠插件在轮末「记」不够 —— 搜索接口不会因此少返回一条，
+    //   子代理照样会把同一个热门视频再挑一遍。必须**在派活之前就告诉它**别再挑。
+    //   定点（看某一条）不加：那条本来就是点名要看的。
+    if (!定点) {
+      try {
+        const 已刷过 = 最近看过的(join(stateDir, 'seen.md'), 40)
+        if (已刷过.length) {
+          prompt += '\n\n🚫 **下面这些已经刷过了，别再挑**（判重表里记着；再推一遍就是重复推送，是 bug）：'
+            + 已刷过.join('、')
+        }
+      } catch (e) {
+        log('读判重表没成（这轮不判重）：' + (e?.message ?? e))
+      }
+    }
 
     let run
     扫描中 += 1
@@ -938,27 +1004,69 @@ export function apply(ctx, config) {
       //    自动刷一派子代理就失败。现在**两个都填了才指定**，留空就跟当前会话用一样的。
       const 子provider = String(cfg.subProvider || '').trim()
       const 子model = String(cfg.subModel || '').trim()
-      // ⭐ 这台 DSH 有没有新接口？没有就走兜底（新建会话 + 递提示词 + 读日志）
-      if (!ctx.subagents || typeof ctx.subagents.startActivation !== 'function') {
-        log('这台 DSH 没有 subagents.startActivation，改用兜底：新建会话派活')
-        const 兜 = await 兜底派活(prompt, 子provider, 子model)
-        if (!兜.ok) {
-          扫描中 = Math.max(0, 扫描中 - 1)
-          return { ok: false, error: 兜.error }
-        }
-        return { ok: true, report: 兜.output, hint: '' }
+      // ⭐ 这台 DSH 有哪种子代理接口？挨个认（0.9.10）。
+      //   rc.1/rc.2 是 `startActivation(spec)`；rc.3 改成了 `startContinuable(spec)`（形状一样）
+      //   和一次性用的 `start(name, request)`。以前只认 startActivation，rc.3 上要么走兜底、
+      //   要么在接口内部读 `request.parent.id` 时炸（用户实报：Cannot read properties of undefined (reading 'id')）。
+      // ⚠ 父会话得是**活着的 Agent**（接口内部要读 parent.id / parent.session）。
+      //   拿不到就重问一次 currentInitiator，还不行就走兜底，别把 undefined 递进去。
+      let 父 = parent
+      if (!父 || !父.id) {
+        try { 父 = ctx.agents?.currentInitiator?.() || 父 } catch (e) {}
       }
-      run = await ctx.subagents.startActivation({
+      if (!父 || !父.id) {
+        log('没拿到活着的父会话（currentInitiator 空），改用兜底：新建会话派活')
+        const 兜2 = await 兜底派活(prompt, 子provider, 子model)
+        if (!兜2.ok) {
+          扫描中 = Math.max(0, 扫描中 - 1)
+          return { ok: false, error: 兜2.error }
+        }
+        return { ok: true, report: 兜2.output, hint: '' }
+      }
+      const 基 = {
         provider: 'spawn',
         label: '刷B站：' + dir.slice(0, 20),
-        request: {
-          prompt: [{ type: 'text', text: prompt }],
-          parent,
-          ...(子provider && 子model ? { agentOptions: { provider: 子provider, model: 子model } } : {}),
-        },
+        parent: 父,
+        prompt: [{ type: 'text', text: prompt }],
         signal: exec?.signal || new AbortController().signal,
-        delivery: 'caller',
-      })
+        ...(子provider && 子model ? { agentOptions: { provider: 子provider, model: 子model } } : {}),
+      }
+      // ⭐ 1.0.1：形状挨个试，哪个不抛用哪个。
+      //   用户的实测：rc.3 上 `startActivation` 还在，但要的是**扁平 spec**（它内部读 `spec.parent.id`），
+      //   传 `{ request: { parent } }` 就等于 parent 是 undefined，直接抛 "reading 'id'"。
+      //   所以「扁平」排在「包一层」前面。
+      const 接口 = 选子代理接口(ctx.subagents)
+      const 试们 = []
+      if (接口 === 'continuable') 试们.push('continuable')
+      if (接口 === 'activation') 试们.push('activation-flat', 'activation-nested')
+      if (接口 === 'start') 试们.push('start')
+      let 最后错 = ''
+      for (const 模式 of 试们) {
+        try {
+          if (模式 === 'continuable') {
+            run = await ctx.subagents.startContinuable(造子代理参数('continuable', 基))
+          } else if (模式 === 'activation-flat' || 模式 === 'activation-nested') {
+            run = await ctx.subagents.startActivation(造子代理参数(模式, 基))
+          } else if (模式 === 'start') {
+            const 参 = 造子代理参数('start', 基)
+            run = await ctx.subagents.start(参.名, 参.请求)
+          }
+          if (run) { log('子代理派活走的是：' + 模式); break }
+        } catch (e) {
+          最后错 = String(e?.message ?? e)
+          log('子代理派活「' + 模式 + '」不行：' + 最后错)
+        }
+      }
+      if (!run) {
+        // 所有形状都不行 → 兜底新建会话，别让整个 bili_scan 挂掉
+        log('子代理接口都试过了（' + (试们.join(' / ') || '一个都没有') + '），改用兜底：新建会话派活' + (最后错 ? '（最后一句错：' + 最后错 + '）' : ''))
+        const 兜3 = await 兜底派活(prompt, 子provider, 子model)
+        if (!兜3.ok) {
+          扫描中 = Math.max(0, 扫描中 - 1)
+          return { ok: false, error: 兜3.error }
+        }
+        return { ok: true, report: 兜3.output, hint: '' }
+      }
     } catch (e) {
       扫描中 = Math.max(0, 扫描中 - 1)
       return { ok: false, error: '派子代理失败：' + (e?.message ?? e) }
@@ -1254,6 +1362,7 @@ export function apply(ctx, config) {
       })
     },
   })
+
 
   tool({
     name: 'bili_reply',
@@ -1600,7 +1709,6 @@ export function apply(ctx, config) {
   /* ⭐ 2026-10-23（反馈）：原来只认 `session-` 开头的目录名，
    *    于是别的插件自己建的会话（`bili-whale`、IM 桥的 `im-…`）在下拉里根本选不到。
    *    真正该排掉的只有「裸 UUID」那些（子代理 / 会话内容的中间目录）。 */
-  const 是会话目录 = (sid) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(sid || ''))
 
   // ⭐ 自动刷：到点不 headless，而是往「伙伴住的会话」followup 一句，让 TA 自己开一轮去刷（占每天额度）
   //   目标会话：设置里选的优先；没选就自动挑「最近聊过、非空、非归档」的那个 —— 不写死任何人的 id
@@ -1636,7 +1744,9 @@ export function apply(ctx, config) {
       }
       for (const { ws, sid } of 位置) {
         {
-          if (!是会话目录(sid)) continue
+          // ⚠ 别拿 id 的形状当判据：插件建的会话（QQ 群那种）就是裸 uuid，
+          //   按「看起来像 uuid 就跳过」会正好把「未分组」那批筛掉。
+          //   有没有日志才是判据（下一条）。
           if (archived.has(sid)) continue
           if (!existsSync(join(sessRoot, ws, sid, 'session.v4.jsonl.zstd'))) continue
           let at = 0
@@ -2789,9 +2899,17 @@ export function apply(ctx, config) {
           try { return readdirSync(p, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name) } catch { return [] }
         }
         const rows = []
-        for (const ws of dirs(sessRoot)) {
-          for (const sid of dirs(join(sessRoot, ws))) {
-            if (!是会话目录(sid)) continue                       // 子代理（纯 UUID）不要
+        const 位置 = []
+        for (const 一层 of dirs(sessRoot)) {
+          // 「未分组」的会话直接躺在 sessions/<id>/ 下，没有中间那层工作区目录
+          if (existsSync(join(sessRoot, 一层, 'session.v4.jsonl.zstd'))) {
+            位置.push({ ws: '', sid: 一层 })
+            continue
+          }
+          for (const sid of dirs(join(sessRoot, 一层))) 位置.push({ ws: 一层, sid })
+        }
+        for (const { ws, sid } of 位置) {
+          {
             if (!existsSync(join(sessRoot, ws, sid, 'session.v4.jsonl.zstd'))) continue   // 没有日志 = 不算真会话
             if (archived.has(sid)) continue                                 // 跳过归档
             let title = ''

@@ -1,3 +1,37 @@
+## 1.0.1 — 2026-11-14
+
+**rc.3 上还是「派子代理失败：Cannot read properties of undefined (reading 'id')」**
+
+- 🐞 1.0.0 只改了「用哪个方法」，没改「参数长什么样」。rc.3 的 `startActivation` 要的是
+  **扁平 spec** —— 它内部读 `spec.parent.id`，`parent` 和 `prompt` 都在顶层；
+  而插件传的是 `{ request: { prompt, parent } }`，等于 `spec.parent` 是 undefined，一读 `.id` 就抛。
+- 现在把几种形状都造出来挨个试：`continuable` → `activation-flat`（rc.3）→ `activation-nested`（rc.1/rc.2）
+  → `start(name, request)`，哪个不抛用哪个；全都不行再退回「新建会话派活」，`bili_scan` 不会整条挂掉。
+- 日志里会写一句「子代理派活走的是：xxx」，下次对不上版本一眼能看出来。
+
+## 1.0.0 — 2026-11-14
+
+**rc.3 上 bili_scan 一直报「派子代理失败」**
+
+- 🐞 DSH 0.2.2-rc.3 把子代理接口改了：`startActivation` 换成了 `startContinuable`（形状一样），
+  另外还有一个一次性的 `start(provider, request)`。插件以前只认 `startActivation`，
+  在 rc.3 上要么落到兜底、要么在接口内部读 `request.parent.id` 时炸：
+  `Cannot read properties of undefined (reading 'id')`。
+- 现在按「有哪个用哪个」依次认：`startContinuable` → `startActivation` → `start` → 兜底新建会话。
+- 🐞 父会话补了一道检查：拿到的不是活着的 Agent（没有 `id`）就重问一次
+  `currentInitiator`，还拿不到就走兜底 —— 不把 `undefined` 递给接口。
+
+## 0.9.9 — 2026-11-13
+
+**判重表只写不读：同一个热门视频被反复推、反复评论 @ 人**
+
+- 🐞 0.9.7 起插件在轮末往「看过的视频」里记，但**没有任何代码读它**：`bili_search` 照旧把
+  同一批热门端上来（按播放排序的前十条几天都不变），派活的提示词里也没提判重。
+- 🐞 轮末记账只在 `bili_scan` 跑完时触发 —— 伙伴自己搜、自己挑、自己评论那条路一条记录都进不了表。
+- 现在两处都补上：**搜索时过滤掉表里已有的**；**评论 / 三连之后立刻记账**（那条路也进表）。
+  派活前还会把最近刷过的 BV 写进提示词，让它在挑之前就知道。
+- 会话列表也不再拿 id 形状当判据：未分组的裸 uuid 会话也能选到。
+
 ## 0.9.8 — 2026-11-03
 
 **选不到「未分组」里的会话；老版本 DSH 上派不出子代理**

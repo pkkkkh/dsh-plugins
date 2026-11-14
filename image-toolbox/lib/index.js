@@ -12,7 +12,7 @@ export const inject = ['tools']
 
 const DEFAULTS = {
   baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-  model: 'doubao-seedream-4-5-251128',
+  model: 'doubao-seedream-5-0-flash-260915',
   outputDir: 'D:\\Videos\\img',
   size: '1024x1024',
   keyFile: 'C:\\Users\\kh006\\.dsh\\ark.key',

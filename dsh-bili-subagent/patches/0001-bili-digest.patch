@@ -1,0 +1,132 @@
+diff --git a/index.js b/index.js
+index 1f3ea33..ee61d98 100644
+--- a/index.js
++++ b/index.js
+@@ -1344,6 +1344,26 @@ export function apply(ctx, config) {
+     },
+   })
+ 
++  tool({
++    name: 'bili_digest',
++    description: '一次拿全：视频数据 + 压缩字幕（带时间戳）+ 前几条热评。入选的视频**只调这一次**，别再三分别调 video_info / subtitle / comments。',
++    parameters: {
++      bvid: { type: 'string', description: 'BV号' },
++      comments: { type: 'number', description: '热评条数（默认 5，0~10）' },
++      lines: { type: 'number', description: '字幕最多几句（默认 40，按时间均匀抽样）' },
++      full: { type: 'boolean', description: 'true = 返回完整字幕（贵，慎用）' },
++    },
++    async execute(args) {
++      return call('bili_digest', {
++        bvid: String(args?.bvid ?? '').trim(),
++        comments: Math.max(0, Math.min(10, Number(args?.comments ?? 5))),
++        lines: Math.max(5, Math.min(120, Number(args?.lines ?? 40))),
++        full: Boolean(args?.full),
++      })
++    },
++  })
++
++
+   tool({
+     name: 'bili_reply',
+     description: '在视频下发一条评论，或回复某条评论（楼中楼）。短、干净、像人说的话。\n'
+diff --git a/vendor/bilibili-mcp/mcp_server.py b/vendor/bilibili-mcp/mcp_server.py
+index 60a1b92..6be619f 100644
+--- a/vendor/bilibili-mcp/mcp_server.py
++++ b/vendor/bilibili-mcp/mcp_server.py
+@@ -531,6 +531,96 @@ async def bili_subtitle(bvid: str) -> str:
+     }, ensure_ascii=False)
+ 
+ 
++# ========== Tool 3.5: 一次拿全（浓缩报告用） ==========
++
++@tool()
++async def bili_digest(bvid: str, comments: int = 5, lines: int = 40, full: bool = False) -> str:
++    """一次拿全「写报告」要用的料：基础数据 + 压缩字幕（带时间戳）+ 前几条热评。
++
++    入选的视频只调这一次，**别再分别调** bili_video_info / bili_subtitle / bili_comments。
++
++    Args:
++        bvid: 视频BV号
++        comments: 热评条数（0~10，默认 5）
++        lines: 字幕最多给几句（默认 40，按时间均匀抽样，避免全文灌进上下文）
++        full: true = 返回完整字幕（贵，只在需要逐句核对时用）
++    """
++    cred = get_cred()
++    v = video.Video(bvid=bvid, credential=cred)
++    info = await v.get_info()
++    stat = info.get("stat") or {}
++    cid = info.get("cid") or ((info.get("pages") or [{}])[0].get("cid") or 0)
++    out = {
++        "bvid": bvid,
++        "title": info.get("title", ""),
++        "up": (info.get("owner") or {}).get("name", ""),
++        "duration": info.get("duration", 0),
++        "stat": {k: stat.get(k, 0) for k in ("view", "like", "coin", "favorite", "reply", "danmaku")},
++        "subtitle": None,
++        "comments": [],
++    }
++
++    try:
++        sub_list = await v.get_subtitle(cid=cid)
++        subs = sub_list.get("subtitles") or []
++        target = None
++        for s in subs:
++            if s.get("lan") in ("ai-zh", "zh-CN", "zh"):
++                target = s
++                break
++        if target is None and subs:
++            target = subs[0]
++        if target:
++            url = target.get("subtitle_url", "")
++            if url.startswith("//"):
++                url = "https:" + url
++            import aiohttp
++            async with aiohttp.ClientSession() as ses:
++                async with ses.get(url) as resp:
++                    body = (await resp.json()).get("body") or []
++            segs = []
++            for x in body:
++                text = str(x.get("content", "")).strip()
++                if not text:
++                    continue
++                t = int(float(x.get("from", 0) or 0))
++                segs.append((t, text))
++            if full:
++                pick = segs
++            else:
++                n = max(5, min(120, int(lines or 40)))
++                if len(segs) <= n:
++                    pick = segs
++                else:
++                    step = (len(segs) - 1) / (n - 1)
++                    pick = [segs[round(i * step)] for i in range(n)]
++            out["subtitle"] = {
++                "language": target.get("lan_doc", ""),
++                "segments": len(segs),
++                "truncated": len(pick) < len(segs),
++                "lines": [{
++                    "t": "%02d:%02d" % (t // 60, t % 60),
++                    "s": text[:80],
++                } for t, text in pick],
++            }
++    except Exception as e:
++        out["subtitle"] = {"error": str(e)[:120]}
++
++    try:
++        n = max(0, min(10, int(comments or 0)))
++        if n:
++            raw = json.loads(await bili_comments(bvid, n))
++            items = raw.get("comments") or []
++            out["comments"] = [{
++                "user": c.get("user", ""),
++                "likes": c.get("like", 0),
++                "text": str(c.get("content", ""))[:80],
++            } for c in items[:n]]
++    except Exception as e:
++        out["comments_error"] = str(e)[:120]
++
++    return json.dumps(out, ensure_ascii=False)
++
+ # ========== Tool 4: 获取弹幕 ==========
+ 
+ @tool()
